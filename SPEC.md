@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.2（补齐最小角色区分 + 会话回收） |
+| 版本 | v1.2（声明式角色管理 + 只读管理页 + 会话回收） |
 | 日期 | 2026-10-02 |
 | 状态 | 规格已确认，进入实施 |
 | 交付周期 | 3 周 |
@@ -32,8 +32,8 @@
 | D-15 | 分类：难度 + 算法标签 + 来源标签 | D-33 | 容器：mysql + oj 双容器 |
 | D-16 | 进度：由提交历史自动推导 | D-34 | 日志：应用日志 + judge 日志双文件 |
 | D-17 | 时间：存 UTC + 前端本地化 | D-35 | 历史页：全局页 + 题内最近 5 次 |
-| D-18 | 存储：MySQL | D-36 | 页面：login / list / problem / history 四页 |
-| — | — | D-37 | 角色：仅 `admin`/`user` 两值，首个注册用户自动提权；无管理后台 |
+| D-18 | 存储：MySQL | D-36 | 页面：login / list / problem / history 四页（`D-37` 追加 `admin.html`，共五页） |
+| — | — | D-37 | 角色：`OJ_ADMIN_USERNAMES` 声明式名单，启动时同步；1 个只读 admin 端点 + 极简管理页 |
 
 ---
 
@@ -60,7 +60,7 @@
 
 **非目标（首版明确不做）**：多语言执行、竞赛/排行榜、实时推送、题解社区、支付、管理后台、移动端原生适配、真沙箱安全隔离。
 
-> **关于"管理后台"的澄清** `[D-37]`：v1.2 引入了**最小角色区分**（`users.role` 仅 `admin`/`user` 两值，首个注册用户自动提权，见 §6.3），用于解决两个现实问题 —— ① 注册完全开放且无任何限制；② 系统里没有任何途径指定"第一个用户是管理员"。但**这不等于管理后台**：v1.2 **没有**管理页面、**没有**题库在线编辑、**没有**任何基于 admin 的增删改端点。`role` 唯一的作用是「未来加管理端点时的授权判断依据」，v1.2 内**没有任何代码读取它做放行决策**。原因见 §6.3 的成本说明。
+> **关于"管理后台"的澄清** `[D-37]`：v1.2 引入**最小角色体系** —— `users.role` 仅 `admin`/`user` 两值，管理员由 `.env` 的 `OJ_ADMIN_USERNAMES` **声明式指定**（启动时同步，见 §6.3.1），并配**一个只读**管理端点 `GET /api/admin/overview` 与**一个极简**页面 `admin.html`。这**仍然不是管理后台**：没有管理界面上的增删改、没有题库在线编辑、没有禁用/删除用户、没有 impersonation。角色可反复调整，但**调整途径是改配置 + 重启**，不是点按钮 —— 这与 §2.2 既定的「运行时改题需重启」运维模式一致，不引入第二套配置哲学。
 
 ### 1.3 核心用户流程
 
@@ -81,7 +81,7 @@
 | 性能 | 页面加载 < 1s；提交到拿到结果 P95 < 8s（10 用例以内）；列表查询 P95 < 200ms |
 | 并发 | 支持 10 个用户同时提交；全局同时评测数硬上限 8；单用户同时评测数上限 2 |
 | 可靠性 | 服务重启后不出现永久"评测中"的任务；judge 进程崩溃不拖垮主进程 |
-| 安全 | 用户代码不可读文件系统（除自身工作目录）、不可无限 fork、不可超限占用内存/CPU/磁盘；所有 SQL 走预处理语句；注册可一键关闭（`OJ_ALLOW_REGISTER=0`）；`users.role` 区分 `admin`/`user` |
+| 安全 | 用户代码不可读文件系统（除自身工作目录）、不可无限 fork、不可超限占用内存/CPU/磁盘；所有 SQL 走预处理语句；注册可一键关闭（`OJ_ALLOW_REGISTER=0`）；管理员由 `.env` 的 `OJ_ADMIN_USERNAMES` 声明（`users.role`），`/api/admin/*` 需 `role='admin'` |
 | 可观测 | 应用日志与 judge 日志分文件、按天切割、保留 7 天 |
 | 成本 | 单机 2 核 4G 可稳定运行，无额外中间件（无 Redis / MQ） |
 | 兼容性 | 桌面 Chrome/Edge/Safari 最近两个大版本；1280px 以上宽度 |
@@ -189,7 +189,7 @@ CREATE TABLE users (
   id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   username      VARCHAR(32)  NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,           -- bcrypt, cost=10
-  role          ENUM('user','admin') NOT NULL DEFAULT 'user',  -- D-37 最小角色，见 §6.3 提权规则
+  role          ENUM('user','admin') NOT NULL DEFAULT 'user',  -- D-37 真源为 OJ_ADMIN_USERNAMES，启动时同步，见 §6.3.1
   created_at    DATETIME     NOT NULL,
   UNIQUE KEY uk_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -741,6 +741,7 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 /home/ZL/project/cpp-oj-vibcoding/
 ├── SPEC.md
 ├── docker-compose.yml
+├── .env                        # OJ_ALLOW_REGISTER / OJ_ADMIN_USERNAMES（D-37 角色的唯一真源）
 ├── Dockerfile
 ├── db/
 │   └── init/01-schema.sql            # 挂载到 /docker-entrypoint-initdb.d
@@ -756,13 +757,14 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 │   │                  generator.h   # tester.cpp 代码生成器
 │   │                  runner.h       # fork + setrlimit 执行
 │   │                  compiler.h     # g++ 调用 + 输出解析
-│   └── web/            routes.h  session.h  ratelimit.h
+│   └── web/            routes.h  session.h  ratelimit.h  admin.h  # admin.h = require_admin 守卫 + overview
 ├── src/                （对应 .cpp）
 ├── static/
 │   ├── login.html  list.html  problem.html  history.html
-│   ├── css/  app.css  problem.css
+│   ├── admin.html                       # 仅 admin，只读（D-37）
+│   ├── css/  app.css  problem.css  admin.css
 │   └── js/   api.js  auth.js  list.js  problem.js  history.js
-│           editor.js  markdown.js  poll.js  common.js
+│           editor.js  markdown.js  poll.js  common.js  admin.js
 ├── logs/               # volume 挂载点
 └── tests/
     ├── run_tests.sh                 # 端到端验收脚本
@@ -803,7 +805,7 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 | 0 | 200/201 | 成功 | — |
 | 1001 | 400 | 参数校验失败 | 用户名为空、密码过短、代码超长、slug 不存在格式 |
 | 1002 | 401 | 未登录 | 未带 Cookie 或会话过期 |
-| 1003 | 403 | 无权限 | 访问他人提交详情 |
+| 1003 | 403 | 无权限 | 访问他人提交详情；**非 admin 访问 `/api/admin/*`** |
 | 1004 | 404 | 资源不存在 | 题目/提交 ID 不存在 |
 | 1005 | 409 | 冲突 | 用户名已注册 |
 | 1006 | 429 | 请求过于频繁 | 每分钟提交数超限 |
@@ -825,51 +827,61 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 
 | Method | Path | Auth | 说明 |
 |---|---|---|---|
-| POST | `/api/auth/register` | 否 | `{username, password}` → `201 {userId, username, role}`。**先查 `OJ_ALLOW_REGISTER`**，为 0 时返回 1010 且不落库。提权规则见下方 §6.3.1 |
+| POST | `/api/auth/register` | 否 | `{username, password}` → `201 {userId, username, role}`。**先查 `OJ_ALLOW_REGISTER`**，为 0 时返回 1010 且不落库。**本端点不涉及提权** —— 角色一律由启动同步决定（§6.3.1），新注册用户恒为 `user` |
 | POST | `/api/auth/login` | 否 | `{username, password}` → `Set-Cookie: sid=...; HttpOnly; SameSite=Lax; Path=/` + `{userId, username, role}`。**顺带触发过期会话回收**（§6.3.2） |
 | POST | `/api/auth/logout` | 否 | 删除会话行，清 Cookie |
 | GET | `/api/auth/me` | 是 | `{userId, username, role}`；未登录返回 401 |
 
-#### 6.3.1 首个用户自动提权 `[D-37]`
+#### 6.3.1 角色声明与同步 `[D-37]`
 
-**规则**：注册时若 `users` 表为空，该用户 `role='admin'`；否则 `role='user'`。
-
-**为什么需要它**：这是角色系统唯一的硬性必要性 —— 一个支持角色的系统必须有一条路径来指定"谁是管理员"，否则 `role` 列永远是 `user`，整列失去意义。除此之外本项目**没有**任何 admin 相关端点（见 §1.2 的澄清）。
-
-**并发安全**：上面那句规则字面执行是**有竞态的** —— 两个并发注册请求都可能观察到 `COUNT(*)=0`，从而产生**两个 admin**。MySQL 的默认隔离级别（`REPEATABLE READ`）挡不住，因为两条语句在各自事务的一致性视图里都合法。
-
-**解法**：用 MySQL 的**命名 advisory lock** 把「查表 + 插入」串行化。
+**设计取向：声明式，而非事件式。** 管理员身份不是"某个注册时刻恰好是第一个"这种隐式、一次性、不可逆的状态，而是**运维在配置里写明的一句话**。`OJ_ADMIN_USERNAMES`（逗号分隔的用户名）是 `users.role` 的**唯一真源**，服务启动时同步一次。
 
 ```sql
--- ① 取锁。返回 1=拿到，0=超时，NULL=出错（如 5.6 以下不支持多锁）
-SELECT GET_LOCK('oj_bootstrap_admin', 5);
--- ② 若拿到 1：在单事务内完成判定与插入
-START TRANSACTION;
-SELECT COUNT(*) INTO @is_first FROM users;
-INSERT INTO users (username, password_hash, role, created_at)
-  VALUES (?, ?, IF(@is_first = 0, 'admin', 'user'), NOW());
-COMMIT;
--- ③ 释放。必须与 ① 同一连接，否则锁不归你
-SELECT RELEASE_LOCK('oj_bootstrap_admin');
+-- 启动时执行一次，幂等
+UPDATE users SET role='admin' WHERE username IN (?,?,...);     -- 名单内提权
+UPDATE users SET role='user'  WHERE username NOT IN (?,?,...);  -- 名单外降权
 ```
+
+**为什么不用"首个注册用户自动提权"**：该规则依赖"`users` 表为空"这个前提，而数据卷是持久的（§2.1 / D-33）。首次部署后条件立刻不再成立，于是：① 测试期间注册的临时账号会永久占用 admin 名额；② 真实用户之后注册永远是 `user`；③ `docker compose down && up`（NF-6）不清卷，卡死状态持续存在。而唯一修复途径是 shell 手改 SQL —— 等于"设计了角色却没有管理路径"。声明式名单彻底消除这个坑，且**能修复任何存量数据**。
 
 **实现约束（4 条，缺一不可）**：
 
-1. **同一连接**：`GET_LOCK` 是**连接级**（session-scoped）而非事务级。DAO 若每次调用都换连接，② 里的 `COMMIT` 不会释放锁、③ 也 `RELEASE_LOCK` 不掉。**取锁到释放必须在同一个 `MYSQL*` 上完成**。
-2. **必须释放，且要兜底**：用 RAII（析构函数里 `RELEASE_LOCK`）而不是顺序语句。异常路径（bcrypt 失败、用户名重复、INSERT 报错）若漏了释放，这个锁会一直挂着，后续所有注册请求都在 5s 超时上失败 —— 表现为"注册功能彻底坏掉且原因难查"。
-3. **MySQL ≥ 5.7.5**：低版本一条连接同时只能持有一个命名锁，新 `GET_LOCK` 会静默释放旧锁。本项目固定 MySQL 8.0（D-18/D-33），不受影响，但锁名应带模块前缀（`oj_`）以免与其他子系统撞名。
-4. **超时值 5s**：拿不到锁时**不要重试**，直接返回 500/1008 并在日志记 `"bootstrap lock timeout"`。锁只持有几毫秒，5s 还拿不到说明有别的问题。
+1. **必须区分「变量未设置」与「设置为空」**。
+   - `getenv("OJ_ADMIN_USERNAMES") == NULL`（变量不存在，`.env` 缺失或名字拼错）→ **完全跳过同步**，一条 UPDATE 都不执行，`role` 列零变化。
+   - `getenv(...)` 返回 `""`（显式留空）→ 执行同步，结果为**零 admin**。
+   两者语义不同：前者是"我没配置，别动我"，后者是"我要收回所有权限"。若混为一谈，一次 `.env` 丢失 + `docker compose restart` 就会静默把所有人降权，且日志里看不出异常。
+2. **双向同步，不能只提权不降权**。单向提权下，从 `.env` 删掉一个名字**不会回收**其管理员身份，越积越多。既然声明为唯一真源，就必须双向。风险（手滑清空名单把自己降权）由约束 1 的安全阀与约束 4 的回显兜住。
+3. **名单内不存在的用户名逐个 `WARN` 点名，同步本身不失败**。`OJ_ADMIN_USERNAMES=alise`（拼错）会导致目标用户没被提权，而若只记一句"同步完成"就成了静默失败 —— 这是本方案唯一真正的失败模式，必须让它可见。缺失名单不影响其他用户提权。
+4. **同步后无条件回显最终 admin 名单；结果为空时额外 `WARN` 提示去 `.env` 配置**。降权是**不可见**的操作（用户不会收到任何通知，下次访问 `/api/admin/*` 突然 403），没有启动日志回显就没有反馈。
 
-> **为什么不用全局 `DB mutex` 兜住**：§2.3 的全局互斥量其实已经能覆盖这个竞态（只要注册全程持锁）。选 `GET_LOCK` 的理由是**把不变量收进数据层**，不依赖调用方是否记得跨多个 DAO 调用持有互斥量 —— 后者是纪律性约束，纪律会失效，而 `GET_LOCK` 是数据库强制的。代价是注册路径多一次命名锁往返（可忽略）。
+**执行位置**：§9 T3.9 启动顺序中，建表校验之后、题库加载之后（与题库同步同一时机，复用同一套「改文件/改配置 + 重启」的运维模式）。**只在启动时执行**，运行期不轮询 —— 角色变更一律通过重启生效，这是刻意选择：单机工具不需要热更新，而「改了要重启」是显式且可预期的。
 
-**唯一恢复路径**：管理员密码丢失且无法找回时，没有自助页面，只能走 shell（§5.4 已假定操作者有 shell）：
+**如何切换**（这张表是本节存在的意义）：
+
+| 我想做的事 | 操作 | 需重启 |
+|---|---|---|
+| 切换**账号** | `logout` → `login` | 否 |
+| 把某人升为管理员 | `.env` 的 `OJ_ADMIN_USERNAMES` 加名字 → restart | 是 |
+| 取消某人的管理员 | `.env` 删名字 → restart | 是 |
+| 查谁是管理员 | 启动日志回显 / `GET /api/admin/overview` | 否 |
+| 确认自己是不是管理员 | `auth/me` 的 `role` 字段 | 否 |
+| 以他人身份登录（impersonation） | **不做**，见下 | — |
+| 管理员查看他人提交 | **不做**，见下 | — |
+
+**为什么不做 impersonation**：它要求平台能以任意用户身份操作，审计要求最高（"这条记录是谁做的"变得不可追溯），而本项目定位是个人单机自用（D-01 / §5.4），收益远小于风险。
+
+**为什么 admin 不绕过「仅本人」**：§5.4 已诚实声明用户持 shell 即可直连 MySQL 读取任意 `submissions` 行。在这种威胁模型下，"admin 能看全部提交"**不构成安全边界**，只是运维便利。AC-13 的归属校验因此保持严格不变。
+
+**唯一恢复路径**：若 `.env` 配错导致无人是 admin（或管理员密码丢失），没有自助页面，只能走 shell（§5.4 已假定操作者有 shell）：
 
 ```bash
 docker compose exec mysql mysql -uoj -poj oj \
   -e "UPDATE users SET role='admin' WHERE username='someone';"
 ```
 
-**不做的事**（ conscious omission，v1.2 内 `role` 不参与任何放行决策）：无管理后台、无题库在线编辑（与 D-30「题库 JSON 唯一真源 + 改题需重启」冲突，见 §6.3.3）、admin 不绕过「仅本人」查看他人提交（§5.4 已承认用户持 shell 可直连 MySQL，故"admin 能看全部"不构成安全边界，只是运维便利）、无用户禁用/删除、无注册审核或邀请码。
+> 注意这条命令的修改**会被下次启动的同步覆盖**（env 是唯一真源）。真正的修复是改 `.env` 再重启；shell 命令只用于救急。
+
+**不做的事**（ conscious omission）：无题库在线编辑（与 D-30 冲突，见 §6.3.4）、无 impersonation、无 admin 越权查看他人提交、无用户禁用/删除、无注册审核或邀请码、无页面上修改角色（角色只经配置调整，避免出现"env 与页面两个写路径互相覆盖"）。
 
 #### 6.3.2 过期会话惰性回收
 
@@ -895,13 +907,43 @@ DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP();
 
 **执行位置与约束**：
 
-- 走**同一个全局 `DB mutex`**（§2.3），不要绕开。注意回收发生在登录路径内，**必须在插入新会话行的同一事务之外或之内均可，但不可在持有 `DB mutex` 时再去抢 `GET_LOCK`**（锁顺序风险）。
+- 走**同一个全局 `DB mutex`**（§2.3），不要绕开。回收发生在登录路径内，必须与"插入新会话行"处于**同一事务**或明确的前后关系 —— 若回收与插入分开提交，并发登录时可能删掉刚落库、尚未被客户端持有的会话。
 - `idx_expire` 正是为这条语句设计的，**无需新增索引**（`EXPLAIN` 应为 `type=range`）。
 - `expires_at` 与 `created_at` 存 UTC（§1.4 / D-17），故比较用 `UTC_TIMESTAMP()` 而非 `NOW()`，避免容器时区不是 UTC 时误删未过期会话。**这是本条唯一的正确性要点。**
 - 回收是 `DELETE` 而非 `SELECT` 后删，表小（个人量级）且有索引，单条语句足够。
 - 失败**不影响登录**：回收异常仅记日志，登录照常返回。
 
-#### 6.3.3 为什么不做题库在线编辑
+#### 6.3.3 只读管理端点 `[D-37]`
+
+这是 `users.role` **第一次真正参与放行决策**的地方 —— 在此之前 `role` 只是被记录、无人读取（那会是一列死代码）。
+
+| Method | Path | Auth | 说明 |
+|---|---|---|---|
+| GET | `/api/admin/overview` | 是 + `role='admin'` | 返回系统级运行状态 + 用户清单，见下 |
+
+**授权守卫** `require_admin()`：解析 session Cookie → 取 `users.role` → 非 `admin` 返回 **1003**（复用现有码，不新增）。未登录仍返回 1002，顺序上先判登录再判角色。
+
+**响应结构**：
+
+| 块 | 字段 |
+|---|---|
+| `system` | `userCount` `adminCount` `problemCount` `caseCount` `submissionCount` `acCount` `failedCount` `judgingCount` `queueLength` `activeJudges` `judgeAlive` |
+| `users[]` | `username` `role` `createdAt` `submissionCount` `acCount` `solved` `attempted` `favorites` `lastSubmitAt` `lastVerdict` |
+
+`users[].solved` / `attempted` **直接复用 §6.4 的推导口径**（AC 优先，其次有提交），不另立一套算法 —— 否则管理页与列表页会显示不一致的进度。
+
+**`system` 里有两项不在 DB 里**：
+
+- `queueLength`（内存队列长度）、`activeJudges`（当前评测并发数）、`judgeAlive`（调度器存活）—— 都是 §2.1 判题调度器的**进程内状态**。
+
+由此带来**两条实现约束（易被忽略）**：
+
+1. **必须打通路由层到 scheduler 的访问路径**。§2.1 中 HTTP 层与 Judge 调度器是分离组件，T3 阶段需显式提供句柄或 accessor（如 `judge::scheduler::instance()`），否则该端点无法返回这三项。
+2. **锁顺序**：读这三项需拿 scheduler 的锁，**绝不能在持有 `DB mutex` 时去拿**（§2.3 的既有约束：DB 锁仅在 DAO 调用期间持有）。**建议实现顺序**：先取 scheduler 快照 → 释放其锁 → 再取 `DB mutex` 查 DB 拼 `users[]`。反过来做（先查 DB 再补 scheduler）会引入一条 `DB mutex → scheduler lock` 的嵌套边，与既有锁顺序冲突。
+
+**为什么是只读**：增删改（删用户、禁用、改角色、在线编辑题库）都需要额外设计：删除用户要决定 `submissions` 是留是清；禁用要有生效中间态；改角色会与 §6.3.1 的 env 声明式产生**两个写路径互相覆盖**的歧义。首版一律不做，角色只经配置调整（§6.3.1 的"不做的事"）。
+
+#### 6.3.4 为什么不做题库在线编辑
 
 若将来加管理后台，"在线编辑题目与用例"是最直觉的功能，但它直接违反 D-30 与 §2.2：题库 JSON 是**唯一真源**，且"运行时改题需重启"。在线编辑必须先回答一个问题：**改完写回 JSON 文件，还是让 DB 变成第二真源？**
 
@@ -986,10 +1028,15 @@ FROM problems p ...
 | 题库列表 | `/list.html` | 筛选栏（关键词/难度/标签/进度/收藏）+ 题目表格 + 分页 |
 | 题目详情 | `/problem.html?slug=xxx` | 左右分栏工作台 |
 | 提交历史 | `/history.html` | 全局历史 + 筛选 + 展开详情 |
+| 运维概览 `[D-37]` | `/admin.html` | **仅 admin**：系统运行状态卡片 + 用户清单表。无任何写操作 |
 
 页面间用普通 `<a>` 链接跳转。每个页面独立引入所需 JS 模块，无构建步骤、无框架。
 
-> **v1.2 不新增页面，仍是这四个** `[D-37]`。`role` 的加入不改变任何前端行为：`auth/me` 多返回一个 `role` 字段，但 v1.2 内没有任何 admin 专属 UI，所以前端无需据此隐藏或显示任何入口。`OJ_ALLOW_REGISTER=0` 时 `login.html` 的注册 tab 仍显示，用户提交后收到 1010 的明确报错 —— 接受这个体验，不加"探测注册是否开放"的额外端点。
+> **`admin.html` 严格受限**：只读，两个区块（`system` 状态卡 + `users[]` 表格），没有任何表单提交或按钮写操作。角色调整**不在此页**，只经 `.env` + 重启（§6.3.1）—— 刻意避免"env 声明式"与"页面写"两条路径互相覆盖。详见 §6.3.3。
+
+> **角色对前端的影响范围** `[D-37]`：仅两处 —— ① 顶栏在 `auth/me` 返回 `role==='admin'` 时渲染「运维」入口，普通用户不渲染（**后端仍必须独立校验** `/api/admin/overview`，前端隐藏只是体验，不是安全边界）；② `admin.html` 本身。`login.html` / `list.html` / `problem.html` / `history.html` 的既有交互**完全不受影响**。
+> `OJ_ALLOW_REGISTER=0` 时 `login.html` 的注册 tab 仍显示，用户提交后收到 1010 的明确报错 —— 接受这个体验，不加"探测注册是否开放"的额外端点。
+> 顶栏是各页共用组件（§6.1 的 `common.js`），新增 admin 入口时用 `role` 做条件渲染即可，不需给各页加特判。
 
 ### 7.2 题目详情页布局 `[D-26]`
 
@@ -1039,6 +1086,7 @@ FROM problems p ...
 | Markdown 渲染 | `marked.parse()` 后经 `DOMPurify.sanitize()`，白名单允许 `pre/code/h1~h6/table/ul/ol/li/strong/em/img/a` |
 | 时间显示 `[D-17]` | 接口返回 UTC ISO8601；前端 `new Date()` 转本地，先显示相对时间（"刚刚"/"3 分钟前"/"昨天 15:24"），`title` 属性放完整本地时间 |
 | 401 处理 | 任意接口返回 1002 → 全局跳转 `/login.html?redirect=<当前路径>` |
+| 运维入口 `[D-37]` | `common.js` 启动时调 `auth/me`，`role==='admin'` 时在顶栏渲染「运维」链接指向 `/admin.html`；否则不渲染。**后端 `/api/admin/overview` 独立校验 role**，前端隐藏不作为安全边界 |
 
 ### 7.4 空态与错误态
 
@@ -1075,7 +1123,13 @@ FROM problems p ...
   → 砍掉 M4 的历史页筛选功能，优先保证题目录入完成
 若整体进度落后 > 3 天
   → 砍：收藏功能、题内最近提交、来源标签筛选（保留核心闭环）
+若整体进度落后 > 3 天 且 M4 的 T4.14 尚未开工
+  → 砍：admin.html 页面（T4.14）。**保留 `GET /api/admin/overview` 端点** ——
+    砍页面后管理能力用 curl 仍完全可用，只是没有 UI。顺序必须是"先砍页面、后砍端点"，
+    因为端点是能力的本体，页面只是它的展示层。
 ```
+
+> **admin 功能的降级顺序是刻意安排的** `[D-37]`。角色同步（T3.11）与管理端点（T3.12）属于**能力**，成本低（1 个端点 + 1 个守卫 + 1 段启动同步 SQL），且补的是"无法指定管理员"这个真实缺口；`admin.html`（T4.14）属于**展示**，成本相对高（一个页面 + 前端条件渲染）。因此进度吃紧时先砍页面 —— 丢失的只是可视化，能力与数据一条不少。**这与 §1.2「管理后台仍是非目标」的立场一致：admin 从来不是交付重点，只是别把权限做成一列没人读的死代码。**
 
 ---
 
@@ -1087,7 +1141,8 @@ FROM problems p ...
 - [ ] T0.2 `Dockerfile`：基于 `ubuntu:22.04`，装 `g++-12`、MySQL Connector、cmake、bash
 - [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，11 张表，注意外键依赖顺序：`problems`/`users`/`tags` 须先建）
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
-  - `config.h` 新增 `OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）`[D-37]`
+  - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
+  - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
 - [ ] **验收**：`docker compose up` 后浏览器访问 `localhost:8080` 看到页面；`/var/log/oj/app.log` 正常输出
 
@@ -1128,10 +1183,9 @@ FROM problems p ...
 - [ ] T3.1 `db/mysql_pool.h` + 互斥量串行化；所有 DAO 用预处理语句（**禁止字符串拼接 SQL**）
 - [ ] T3.2 DAO：`user` `problem` `problem_case` `problem_param` `tag` `submission` `submission_case_result` `submission_compile_error` 八组
 - [ ] T3.3 认证：bcrypt 注册/校验 + 64 hex token 会话 + HttpOnly Cookie
-  - 注册路径按 §6.3.1 实现首用户提权：`GET_LOCK('oj_bootstrap_admin',5)` 包住「查表 + 插入」
-  - 4 条实现约束逐条落地：同连接取锁与释放、RAII 兜底释放、锁名带 `oj_` 前缀、超时直接 1008 不重试
   - `register` / `login` / `me` 三个响应体追加 `role` 字段
   - `register` 入口先查 `OJ_ALLOW_REGISTER`，为 0 时返回 1010 且不落库
+  - `register` **不做提权** —— 新用户恒为 `user`，角色只由 T3.9 的启动同步决定
 - [ ] T3.4 限流器：每用户 60s 滑动窗口 + 同时评测数配额
 - [ ] T3.5 路由：§6.3 全部端点 + 统一包络 + 错误码映射
 - [ ] T3.6 列表查询：多条件筛选 + 分页 + JOIN 进度与收藏
@@ -1139,13 +1193,24 @@ FROM problems p ...
 - [ ] T3.8 提交详情端点：仅本人可见 + 按 §6.3 的三步组装 `caseResults` / `compileErrors`
   - `submission_case_results` 按 `case_idx ASC`；`submission_compile_errors` 按 `seq ASC`
   - 字段名映射为 API 契约里的 camelCase，**前端零改动**
-- [ ] T3.9 启动顺序：DB 就绪 → 校验/建表 → 加载题库（同步入库 + 灌缓存）→ 启动 judge → listen
+  - **归属校验不因 admin 放宽**（§6.3.1）
+- [ ] T3.9 启动顺序：DB 就绪 → 校验/建表 → 加载题库（同步入库 + 灌缓存）→ **角色同步** → 启动 judge → listen
   - 建表之后、加载题库之前，跑一次过期会话回收（§6.3.2）
+  - 角色同步紧接题库同步之后，两者复用同一套「改配置 + 重启」的运维模式
 - [ ] T3.10 过期会话回收（§6.3.2）：启动时一次 + 每次登录时一次，`DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP()`
   - **必须用 `UTC_TIMESTAMP()` 而非 `NOW()`** —— 容器时区非 UTC 时会误删未过期会话
   - 复用同一个全局 `DB mutex`；回收失败仅记日志，不阻断登录
   - `EXPLAIN` 确认走 `idx_expire`（期望 `type=range`），无需新增索引
-- [ ] **验收**：`curl` 走通注册→登录→列表→提交→轮询→历史全链路
+- [ ] T3.11 角色同步（§6.3.1）`[D-37]`
+  - 4 条约束逐条落地：未设置则跳过 / 双向同步 / 缺失用户名逐个 WARN / 同步后回显名单
+  - 同步 SQL 走预处理语句占位符（`IN (?,?,...)`），**禁止把名单拼进 SQL 字符串**（§1.4）
+  - 幂等：连续执行两次结果必须完全相同
+- [ ] T3.12 只读管理端点（§6.3.3）`[D-37]`
+  - `require_admin()` 守卫：先判登录（1002）再判角色（1003）
+  - `GET /api/admin/overview` 返回 `system` + `users[]`，`solved`/`attempted` 复用 §6.4 口径
+  - **打通路由层 → scheduler 的访问路径**，否则 `queueLength`/`activeJudges`/`judgeAlive` 拿不到
+  - **锁顺序**：先取 scheduler 快照并释放其锁，再取 `DB mutex` 查 DB；禁止 `DB mutex → scheduler lock` 嵌套
+- [ ] **验收**：`curl` 走通注册→登录→列表→提交→轮询→历史全链路；另用 admin 账号 `curl /api/admin/overview` 返回 200、普通账号返回 1003
 
 ### M4 — 前端（Day 14–17）
 
@@ -1162,7 +1227,12 @@ FROM problems p ...
 - [ ] T4.11 题内最近 5 次提交
 - [ ] T4.12 时间本地化 + 相对时间
 - [ ] T4.13 空态/错误态/401 跳转/CDN 降级路径
-- [ ] **验收**：§1.2 成功标准链路端到端手动走通
+- [ ] T4.14 `admin.html` + 顶栏运维入口 `[D-37]`
+  - `common.js` 按 `auth/me` 的 `role` 条件渲染顶栏「运维」链接
+  - 页面两块：`system` 状态卡（队列长度/并发数/判题存活/各类计数）+ `users[]` 表格（含 role 徽标、AC 率、solved/attempted）
+  - **严格只读**：无表单提交、无写按钮；角色调整入口**不放在此页**（只经 `.env` + 重启）
+  - 普通用户直接访问 `/admin.html` → 接口 1003 → 提示无权限并跳回 `list.html`
+- [ ] **验收**：§1.2 成功标准链路端到端手动走通；admin 账号能打开 `admin.html` 看到状态与用户清单，普通账号看不到入口且直连被拒
 
 ### M5 — 题库录入与打磨（Day 18–21）
 
@@ -1174,9 +1244,14 @@ FROM problems p ...
     返回行数必须为 0。**必须包含至少一条含 TLE 或 MLE 用例的提交** —— 那类用例的
     `time_ms`/`mem_kb` 为 NULL，是 `COALESCE` 约定唯一能被真正验证的路径。
   - **无残留多值断言**：`submissions` 表不存在 `case_results` / `compile_errors` 列
-  - **首用户提权断言** `[D-37]`：清空 `users` 后连续注册 3 个账号，`SELECT COUNT(*) FROM users WHERE role='admin'` 恒等于 1，且该行的 `id` 为 1、`username` 为首个注册者
-  - **并发提权断言** `[D-37]`：清空 `users` 后并发发起 N=8 个注册请求，结束后 `COUNT(*) WHERE role='admin'` 仍为 1（证明 `GET_LOCK` 关闭了竞态）
+  - **角色同步断言** `[D-37]`，逐条对应 §6.3.1 的 4 条约束：
+    1. 名单 `alice,carol` 同步 → 二人 `admin`、`bob` 为 `user`
+    2. **连续同步两次** → 结果完全相同（幂等）
+    3. 名单改为仅 `bob` → `alice`/`carol` **降权**为 `user`（验证双向，而非单向提权）
+    4. 名单含不存在的用户名 → 同步成功、该名字在日志中 `WARN`、**不影响**其他用户提权
+    5. 变量**未设置** → `role` 列零变化；变量**显式空串** → 全部降为 `user`
   - **会话回收断言**：插入若干 `expires_at` 分别为过去/未来的会话行，触发一次登录后 `SELECT COUNT(*) FROM sessions WHERE expires_at < UTC_TIMESTAMP()` 为 0，且未过期行数不变
+  - **admin 端点断言** `[D-37]`：admin 账号 `GET /api/admin/overview` 返回 200；普通账号返回 1003；未登录返回 1002；`users[].solved`/`attempted` 与列表页（§6.4 口径）取值一致
 - [ ] T5.4 压力测试：10 并发提交 × 20 轮，验证无崩溃、无永久 pending
 - [ ] T5.5 恶意输入测试：死循环 / 内存炸弹 / 超长输出 / fork bomb / 空代码
 - [ ] T5.6 README：架构说明、启动方式、题库编写指南
@@ -1206,8 +1281,9 @@ FROM problems p ...
 | AC-15 | 重启恢复 | 手动 `docker compose restart`，重启后无永久"评测中"的任务，pending 任务被重新评测 |
 | AC-16 | 用例落库与范式 | `problem_cases` 行数 = JSON `cases` 长度，`case_count` 与之一致；`problem_params` 与 `params` 长度一致；JSON 删用例后重启不残留幽灵行；`submissions` 表无多值 JSON 列 |
 | AC-17 | 过期会话回收 | 构造若干已过期会话行，触发一次登录（或重启服务）后过期行被删除、未过期行不受影响；`NOW()` 与 `UTC_TIMESTAMP()` 混用导致的误删**必须**被测试覆盖（见 T3.10） |
-| AC-18 | 最小角色与注册开关 `[D-37]` | 首个注册用户 `role='admin'`，其后续注册用户均为 `user`；8 路并发注册后仍只有一个 admin；`OJ_ALLOW_REGISTER=0` 时注册返回 1010 且 `users` 行数不变；`auth/me` 返回 `role` |
-| AC-19 | v1.2 无新增页面 `[D-37]` | 页面集合仍为 login / list / problem / history 四页；`role` 不导致任何前端入口出现或消失；前端文件零改动即可通过 AC-1~AC-16 |
+| AC-18 | 角色声明式同步 `[D-37]` | `OJ_ADMIN_USERNAMES=alice,carol` 启动同步后二人为 `admin`、`bob` 为 `user`；连续同步两次结果相同（幂等）；名单改为仅 `bob` 后 alice/carol **被降权**；名单含不存在用户名时同步仍成功且日志 `WARN` 点名；变量**未设置**时 `role` 零变化、显式**空串**时全部降为 `user`；`OJ_ALLOW_REGISTER=0` 时注册返回 1010 且 `users` 行数不变 |
+| AC-19 | 只读管理能力 `[D-37]` | admin 账号 `GET /api/admin/overview` 返回 200 且 `system`/`users[]` 字段完整；普通账号返回 1003；未登录返回 1002；`queueLength`/`activeJudges`/`judgeAlive` 取自 scheduler 内存态且未触发 `DB mutex → scheduler lock` 嵌套；`admin.html` 可打开且**无任何写操作**；普通用户顶栏不渲染「运维」入口 |
+| AC-20 | 归属校验不因角色放宽 `[D-37]` | AC-13 仍然成立：用户 A 访问用户 B 的提交详情返回 1003，**包括 A 是 admin 的情况**（§6.3.1 的 conscious omission） |
 
 ### 10.2 非功能验收
 
