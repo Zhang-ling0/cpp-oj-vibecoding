@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.1（补齐前端页面 + 注册与权限能力） |
+| 版本 | v1.2（补齐最小角色区分 + 会话回收） |
 | 日期 | 2026-10-02 |
 | 状态 | 规格已确认，进入实施 |
 | 交付周期 | 3 周 |
@@ -11,7 +11,7 @@
 
 ## 0. 决策溯源
 
-本文档由 36 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
+本文档由 37 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
 
 | # | 决策 | # | 决策 |
 |---|---|---|---|
@@ -33,6 +33,7 @@
 | D-16 | 进度：由提交历史自动推导 | D-34 | 日志：应用日志 + judge 日志双文件 |
 | D-17 | 时间：存 UTC + 前端本地化 | D-35 | 历史页：全局页 + 题内最近 5 次 |
 | D-18 | 存储：MySQL | D-36 | 页面：login / list / problem / history 四页 |
+| — | — | D-37 | 角色：仅 `admin`/`user` 两值，首个注册用户自动提权；无管理后台 |
 
 ---
 
@@ -59,6 +60,8 @@
 
 **非目标（首版明确不做）**：多语言执行、竞赛/排行榜、实时推送、题解社区、支付、管理后台、移动端原生适配、真沙箱安全隔离。
 
+> **关于"管理后台"的澄清** `[D-37]`：v1.2 引入了**最小角色区分**（`users.role` 仅 `admin`/`user` 两值，首个注册用户自动提权，见 §6.3），用于解决两个现实问题 —— ① 注册完全开放且无任何限制；② 系统里没有任何途径指定"第一个用户是管理员"。但**这不等于管理后台**：v1.2 **没有**管理页面、**没有**题库在线编辑、**没有**任何基于 admin 的增删改端点。`role` 唯一的作用是「未来加管理端点时的授权判断依据」，v1.2 内**没有任何代码读取它做放行决策**。原因见 §6.3 的成本说明。
+
 ### 1.3 核心用户流程
 
 | 流程 | 描述 |
@@ -78,7 +81,7 @@
 | 性能 | 页面加载 < 1s；提交到拿到结果 P95 < 8s（10 用例以内）；列表查询 P95 < 200ms |
 | 并发 | 支持 10 个用户同时提交；全局同时评测数硬上限 8；单用户同时评测数上限 2 |
 | 可靠性 | 服务重启后不出现永久"评测中"的任务；judge 进程崩溃不拖垮主进程 |
-| 安全 | 用户代码不可读文件系统（除自身工作目录）、不可无限 fork、不可超限占用内存/CPU/磁盘；所有 SQL 走预处理语句 |
+| 安全 | 用户代码不可读文件系统（除自身工作目录）、不可无限 fork、不可超限占用内存/CPU/磁盘；所有 SQL 走预处理语句；注册可一键关闭（`OJ_ALLOW_REGISTER=0`）；`users.role` 区分 `admin`/`user` |
 | 可观测 | 应用日志与 judge 日志分文件、按天切割、保留 7 天 |
 | 成本 | 单机 2 核 4G 可稳定运行，无额外中间件（无 Redis / MQ） |
 | 兼容性 | 桌面 Chrome/Edge/Safari 最近两个大版本；1280px 以上宽度 |
@@ -105,7 +108,7 @@
 │  │  └──────┬───────┘                     ▼                          │  │
 │  │         │                  ┌──────────────────────────────────┐  │  │
 │  │    ┌────▼─────┐            │  Judge Worker × K (K=4)         │  │  │
-│  │    │   DAO    │            │   1. 取题 + 读取用例 JSON        │  │  │
+│  │    │   DAO    │            │   1. 取题 + 读用例（内存缓存）   │  │
 │  │    │ 互斥量    │            │   2. 生成 solution_decl.h       │  │  │
 │  │    └────┬─────┘            │      + tester_util.h            │  │  │
 │  │         │                  │      + tester.cpp                │  │  │
@@ -113,15 +116,15 @@
 │  │         │                  │      g++ user.o tester.cpp -o run│ │
 │  │         │                  │   4. 解析编译器输出 → CE?        │  │  │
 │  │         │                  │   5. 逐用例 fork+setrlimit 执行   │  │  │
-│  │         │                  │   6. 写回 DB (verdict + results) │  │  │
+│  │         │                  │   6. 写回 DB(逐用例行) + 汇总列    │  │  │
 │  └─────────┼──────────────────┴──────────────┬───────────────────┘  │  │
 │            │                                 │                      │
 │    ┌───────▼────────┐              ┌─────────▼──────────────────┐  │
 │    │ 题库加载器      │              │ 工作区 /tmp/oj-judge/<id>/ │  │  │
 │    │ problems/*.json│              │  user.cpp / user.o          │  │  │
 │    │ 启动时 upsert  │              │  *.h / tester.cpp / run     │  │  │
-│    └───────┬────────┘              └────────────────────────────┘  │  │
-│            │                                          完成后清理      │
+│    │ + 灌内存缓存   │              └────────────────────────────┘  │  │
+│    └───────┬────────┘                      完成后清理              │
 │  ──────────┼─────────────────────────────────────────────────────   │
 │            │  mysql://oj:oj@mysql:3306/oj                             │
 │    ┌───────▼────────────────────────────────────────────────────┐    │
@@ -139,7 +142,7 @@
 | 判题隔离 | fork + setrlimit | 零额外依赖，秒级启动，适合单机可信用户 | **无法防逃逸**。恶意用户可读取同机文件。已在 §8 声明为已知风险 |
 | 队列载体 | 进程内线程池 + 内存队列 | 单机无需引入 Redis/MQ，部署最简 | 重启丢失任务 → 用 D-20 兜底：judging 置失败、pending 重放入队 |
 | 用户代码编译 | 两步：`-c user.cpp` → 链接 `user.o + tester.cpp` | 用户代码与题库 harness **物理隔离**，题库代码永不改动 | 签名不匹配在链接期才暴露（错误信息不如编译期友好）。缓解：题面明示签名，生成 `solution_decl.h` 供用户参考 |
-| 用例存储 | JSON 文件为源，启动同步入库 | 题面/用例/模板改一次文件即可，不开数据库 | 运行时改题需重启。首版接受 |
+| 用例存储 | JSON 文件为源，启动同步入库（`problem_cases` / `problem_params`）+ 内存缓存 | 题面/用例/模板改一次文件即可；入库后逐用例可被 SQL 聚合（定位"第几个用例最常错"），不必全表捞 JSON 回应用层解析 | 运行时改题需重启。首版接受 |
 | 生成器复杂度控制 | 结构化字面量为主 + `__expr` 逃生舱 | 覆盖 80% 题目零成本，复杂构造（树/图/链表）用逃生舱 | 逃生舱写法无编译期校验，靠录入时自测 |
 | 内存度量 | harness 内 `getrusage(RUSAGE_SELF)` | 单次调用即可拿到，无需平台侧 wait4 复杂解析 | 报的是**进程峰值**含 harness 自身开销。已在 §5.5 显式声明为已知精度限制 |
 
@@ -167,7 +170,17 @@ users 1───n sessions
 users 1───n submissions n───1 problems
 users n───n problems   (通过 user_problems 表达收藏)
 problems n───n tags    (通过 problem_tags)
+
+-- 题库同步链：JSON 里的数组字段一律拆表，避免"单元格存多值"（见 §3.4）
+problems 1───n problem_cases         -- 题目侧用例：args / expected / brief
+problems 1───n problem_params        -- 题目侧形参：name / cpp_type（生成器用）
+
+-- 判题结果链：与 problem_cases 解耦，只靠 case_idx 快照对齐
+submissions 1───n submission_case_results    -- 逐用例结论 + 输入输出快照
+submissions 1───n submission_compile_errors  -- 逐条编译诊断
 ```
+
+关键取舍：`submission_case_results` **不**外键引用 `problem_cases`。题库是活的（D-30 改 JSON 即改题），而提交历史要求可回放（D-31）；若用外键，改题删用例会让历史详情凭空少行。因此结果表内 `case_idx` 与输入/输出/期望值文本一律**快照**，代价是有意承担的数据重复，换取历史完整性。
 
 ### 3.2 DDL
 
@@ -176,6 +189,7 @@ CREATE TABLE users (
   id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   username      VARCHAR(32)  NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,           -- bcrypt, cost=10
+  role          ENUM('user','admin') NOT NULL DEFAULT 'user',  -- D-37 最小角色，见 §6.3 提权规则
   created_at    DATETIME     NOT NULL,
   UNIQUE KEY uk_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -205,15 +219,43 @@ CREATE TABLE problems (
   statement_md  MEDIUMTEXT   NOT NULL,           -- Markdown 原文，前端渲染
   signature     TEXT         NOT NULL,           -- Solution 类声明（见 §4）
   method_name   VARCHAR(64)  NOT NULL,           -- harness 调用的方法名
+  return_type   VARCHAR(128) NOT NULL,           -- Solution 方法返回类型
+  harness_prelude TEXT       NULL,               -- __expr 逃生舱所需的前置声明/头文件（见 §4.2）
   code_template MEDIUMTEXT   NOT NULL,           -- 编辑器初始内容
   time_limit_ms INT UNSIGNED NOT NULL DEFAULT 3000,
   mem_limit_kb  INT UNSIGNED NOT NULL DEFAULT 131072,
-  case_count    INT UNSIGNED NOT NULL DEFAULT 0, -- 冗余字段，列表页免 JOIN
+  case_count    INT UNSIGNED NOT NULL DEFAULT 0, -- 受控反范式：= COUNT(problem_cases)，列表页免 JOIN，见 §3.4
   is_featured   TINYINT(1)   NOT NULL DEFAULT 0, -- 精选置顶
   sort_no       INT          NOT NULL DEFAULT 0,
   created_at    DATETIME     NOT NULL,
   updated_at    DATETIME     NOT NULL,
   KEY idx_diff (difficulty), KEY idx_featured (is_featured, sort_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 题目侧用例。题库 JSON 的 cases 数组按题内出现顺序展开为多行，
+-- 不以 JSON 文本落库（1NF，见 §3.4）。单条用例内部的 args 仍可为数组 ——
+-- 那是该用例的固有复合参数，不是重复组。
+CREATE TABLE problem_cases (
+  id            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  problem_id    INT UNSIGNED NOT NULL,
+  case_idx      INT UNSIGNED NOT NULL,           -- 题内 0-based 序号，与 @@OJ@@ 的 idx 对齐
+  brief         VARCHAR(255) NULL,               -- 如"基础用例"，展示在结果表
+  args_json     MEDIUMTEXT   NOT NULL,           -- [[2,7,11,15], 9] 或 [{"__expr":"buildTree(...)"}]
+  expected_json MEDIUMTEXT   NOT NULL,
+  UNIQUE KEY uk_problem_case (problem_id, case_idx),
+  CONSTRAINT fk_pc_problem FOREIGN KEY (problem_id) REFERENCES problems(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 题目侧形参。题库 JSON 的 params 数组同样展开。
+-- 元素类型推导规则（§4.2）依赖此表的 cpp_type 列，故必须结构化才能被查询/校验。
+CREATE TABLE problem_params (
+  id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  problem_id INT UNSIGNED NOT NULL,
+  param_idx  INT UNSIGNED NOT NULL,              -- 形参序号，决定调用顺序
+  name       VARCHAR(64)  NOT NULL,              -- 如 nums
+  cpp_type   VARCHAR(128) NOT NULL,              -- 如 std::vector<int>&
+  UNIQUE KEY uk_problem_param (problem_id, param_idx),
+  CONSTRAINT fk_pp_problem FOREIGN KEY (problem_id) REFERENCES problems(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE problem_tags (
@@ -246,20 +288,56 @@ CREATE TABLE submissions (
   status          ENUM('pending','judging','done','failed') NOT NULL DEFAULT 'pending',
   verdict         ENUM('AC','WA','TLE','MLE','RE','CE','JE') NULL, -- 仅 status=done 时非空
   message         VARCHAR(255) NULL,               -- 顶层说明，如"第3个用例超时"
-  case_results    MEDIUMTEXT   NULL,               -- 逐用例结果 JSON 数组
-  compiler_output MEDIUMTEXT   NULL,               -- 原始编译器输出
-  compile_errors  MEDIUMTEXT   NULL,               -- 解析后的 [{line,col,msg}] JSON
-  case_passed     INT UNSIGNED NULL,
-  case_total      INT UNSIGNED NULL,
-  total_ms        INT UNSIGNED NULL,               -- 全用例累计 CPU 时间
-  max_mem_kb      INT UNSIGNED NULL,
+  compiler_output MEDIUMTEXT   NULL,               -- 原始编译器输出全文（原子文本，不拆分）
+  case_passed     INT UNSIGNED NULL,               -- 受控反范式：= COUNT(passed=1) 于 submission_case_results
+  case_total      INT UNSIGNED NULL,               -- 受控反范式：= COUNT(*) 于 submission_case_results
+  total_ms        INT UNSIGNED NULL,               -- 受控反范式：= COALESCE(SUM(time_ms),0)，TLE/MLE 用例度量缺失故不计
+  max_mem_kb      INT UNSIGNED NULL,               -- 受控反范式：= COALESCE(MAX(mem_kb),0)
   created_at      DATETIME     NOT NULL,           -- UTC
   finished_at     DATETIME     NULL,
   KEY idx_user_time (user_id, id DESC),
   KEY idx_problem_time (problem_id, id DESC),
   KEY idx_status (status),
+  KEY idx_user_verdict (user_id, verdict),
   CONSTRAINT fk_sub_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE,
   CONSTRAINT fk_sub_problem FOREIGN KEY (problem_id) REFERENCES problems(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 提交侧逐用例结果。原先这些信息以 JSON 数组存在 submissions.case_results 一列内，
+-- 属"单元格存多值"（1NF 违反），已拆表。前端拿到的 caseResults 由本表按 case_idx
+-- 升序组装（见 §6.3）。文本列为快照，理由见 §3.1。
+CREATE TABLE submission_case_results (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  submission_id BIGINT UNSIGNED NOT NULL,
+  case_idx      INT UNSIGNED    NOT NULL,        -- 快照自 problem_cases.case_idx
+  verdict       ENUM('AC','WA','TLE','MLE','RE') NOT NULL,  -- 单用例结论
+  passed        TINYINT(1)      NOT NULL,
+  args_text     MEDIUMTEXT      NULL,            -- 展示用序列化文本（§5.3 规则）
+  output_text   MEDIUMTEXT      NULL,            -- 用户 stdout
+  expected_text MEDIUMTEXT      NULL,
+  time_ms       INT UNSIGNED    NULL,            -- TLE/MLE 时为 NULL：harness 被 SIGKILL，未产出度量
+  mem_kb        INT UNSIGNED    NULL,            -- 同上
+  error_msg     VARCHAR(255)    NULL,            -- 如"超出时间限制 (3000ms)"、RE 的 stderr 摘要
+  UNIQUE KEY uk_sub_case (submission_id, case_idx),
+  KEY idx_case_verdict (case_idx, verdict),      -- 统计"第几个用例最常错"
+  CONSTRAINT fk_scr_sub FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 提交侧编译诊断。原先为 submissions.compile_errors 的 JSON 数组，同属 1NF 违反。
+-- file_name 已做路径归一化（§5.6，只保留 user.cpp，不暴露服务器目录）。
+-- 未被正则命中的行不进本表，原样留在 submissions.compiler_output。
+CREATE TABLE submission_compile_errors (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  submission_id BIGINT UNSIGNED NOT NULL,
+  seq           INT UNSIGNED    NOT NULL,        -- 出现顺序，保证前端展示与编译器输出一致
+  file_name     VARCHAR(64)     NOT NULL DEFAULT 'user.cpp',
+  line          INT UNSIGNED    NOT NULL,        -- 1-based，行高亮用
+  col           INT UNSIGNED    NOT NULL DEFAULT 0,
+  severity      ENUM('error','warning','note') NOT NULL DEFAULT 'error',
+  message       VARCHAR(512)    NOT NULL,
+  UNIQUE KEY uk_sce_seq (submission_id, seq),
+  KEY idx_sce_line (submission_id, line),
+  CONSTRAINT fk_sce_sub FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
@@ -269,15 +347,94 @@ CREATE TABLE submissions (
 |---|---|
 | 列表页按难度/精选排序 | `idx_diff` / `idx_featured` |
 | 用户历史页倒序翻页 | `idx_user_time` |
+| 历史页按 verdict 筛选 | `idx_user_verdict` |
 | 题目页最近 5 次提交 | `idx_problem_time` |
 | 启动恢复 pending | `idx_status` |
 | 收藏筛选 | `user_problems` 主键 + `idx_fav` |
+| 生成 tester.cpp 时取全部用例 | `problem_cases.uk_problem_case`（按 case_idx 有序） |
+| 提交详情返回逐用例表格 | `submission_case_results.uk_sub_case` |
+| 提交详情返回编译诊断 | `submission_compile_errors.uk_sce_seq` |
+| 复盘统计"某题第 N 个用例最常错" | `submission_case_results.idx_case_verdict` |
+
+`submission_case_results` 有两条访问路径，故两条索引都留：按提交取（详情页，高频）与按用例取（复盘统计，低频但需要）。50 题 × 12 用例量级下，全表 `idx_case_verdict` 也可接受，二者不冲突。
+
+**复盘统计示例**（"某题第几个用例最常错"——原先只能捞 JSON 回应用层 parse，现在一条 SQL）：
+
+```sql
+SELECT r.case_idx,
+       COUNT(*)                       AS attempts,
+       SUM(r.verdict <> 'AC')          AS failed,
+       ROUND(AVG(r.time_ms))          AS avg_ms
+FROM submission_case_results r
+JOIN submissions s ON s.id = r.submission_id
+WHERE s.problem_id = ? AND s.user_id = ?
+GROUP BY r.case_idx
+ORDER BY r.case_idx;
+```
+
+> 两张表都有 `verdict` 列，**必须带表别名前缀**，否则报 `Column 'verdict' in field list is ambiguous`。`AVG` 同样自动忽略 TLE/MLE 的 NULL 行，与 §3.4 的聚合约定一致。
+
+### 3.4 范式取舍与受控反范式
+
+**遵循到 1NF，不再向上。** 本项目是单机自用判题系统，读多写少、无并发报表需求，2NF/3NF 带来的表数量膨胀换不到可观测收益。因此设计准则是：**消灭"单元格存多值"（1NF 硬要求），但不追求纯粹的关系范式（保留必要的派生汇总列）。**
+
+**已消除的多值列**（原先写法 → 现写法）：
+
+| 原写法 | 1NF 问题 | 现写法 |
+|---|---|---|
+| `submissions.case_results` 存逐用例 JSON 数组 | 一格 N 个用例 × 10 个字段，不可索引/约束/聚合 | `submission_case_results` 每用例一行 |
+| `submissions.compile_errors` 存诊断 JSON 数组 | 同上 | `submission_compile_errors` 每条一行 |
+| 用例仅存于 `problems/<slug>.json`，DB 无对应表 | DB 中"用例数"无法由数据推出，`case_count` 成悬空值 | `problem_cases` + `problem_params` |
+| `params` 数组只在文件里 | 类型推导依赖 `cpp_type`，不可查不可校验 | `problem_params` |
+
+**保留的受控反范式**（刻意重复，必须有明确的维护契约）：
+
+| 列 | 派生自 | 为何保留 | 维护契约 |
+|---|---|---|---|
+| `problems.case_count` | `COUNT(problem_cases)` | 列表页免 JOIN | 只由题库加载器在 upsert 用例行后同事务刷新；不从其他路径写 |
+| `submissions.case_passed` | `COUNT(passed=1)` | 列表/历史页直接显示"通过 2/3" | 与用例行**同一事务**写入；写回后不单独 UPDATE |
+| `submissions.case_total` | `COUNT(*)` | 同上 | 同上 |
+| `submissions.total_ms` | `COALESCE(SUM(time_ms),0)` | 避免列表页 N+1 聚合 | 同上 |
+| `submissions.max_mem_kb` | `COALESCE(MAX(mem_kb),0)` | 同上 | 同上 |
+| `submission_case_results` 内的文本快照 | `problem_cases.args_json` | **不可改为外键引用** —— 题库可改，历史必须可回放（D-31） | 只写不改，随 submission 生命周期级联删除 |
+
+> **聚合必须用 `COALESCE(... , 0)`，不能直接用 `SUM`/`MAX`**。TLE/MLE 用例的子进程被 `SIGKILL`，harness 来不及输出该用例的 `@@OJ@@` 行，因此它的 `time_ms` / `mem_kb` 是 NULL。`SUM` 遇 NULL 会跳过，`MAX` 也会跳过 —— 这正是期望行为（被杀的用例不该贡献耗时）。但若一次提交**所有**用例都被杀，裸 `SUM` 返回 NULL 而非 0，与列的 `NOT NULL` 语义冲突。故约定统一以 `COALESCE(...,0)` 收口，写回方与校验方用同一表达式。
+
+**落库后的一致性校验**：`tests/run_tests.sh` 增加一条断言 —— 对每条 `status='done'` 的提交，
+
+```sql
+SELECT COUNT(*) AS violations FROM (
+  SELECT s.id
+  FROM submissions s
+  LEFT JOIN submission_case_results r ON r.submission_id = s.id
+  WHERE s.status = 'done'
+  GROUP BY s.id, s.case_passed, s.case_total, s.total_ms, s.max_mem_kb
+  HAVING s.case_passed <> SUM(CASE WHEN r.passed = 1 THEN 1 ELSE 0 END)
+      OR s.case_total  <> COUNT(r.id)
+      OR s.total_ms    <> COALESCE(SUM(r.time_ms), 0)
+      OR s.max_mem_kb  <> COALESCE(MAX(r.mem_kb), 0)
+) t;   -- 必须返回 0
+```
+
+> 四个汇总列必须一起写进 `GROUP BY`（依赖 `s.id` 的函数依赖），否则 MySQL 8 的
+> `ONLY_FULL_GROUP_BY` 报 `Unknown column 's.case_passed' in 'having clause'`。
+> 用 `LEFT JOIN` 而非 `JOIN`：`status='done'` 但明细行全丢（写回事务异常）时，
+> `COUNT(r.id)` 得 0、`SUM` 得 NULL，才能被这条断言抓出来。
+
+上表任何一条派生规则被改坏、或写回漏了同事务，都会被这条断言抓住。
+
+**仍保留为原子文本、不拆表**：
+
+- `submissions.compiler_output` — 编译器输出的原始全文，是一份不可分的产物，非结构化多值，拆行无收益（`submission_compile_errors` 只是它的结构化旁路）。
+- `problem_cases.args_json` / `expected_json` — 单条用例的**固有复合参数**（一次调用传多个实参），不是"重复组"。这一列的原子性边界止于"一条用例"。
+
+**`users.role` 用 ENUM 单列，不拆 `roles` + `user_roles` 关联表** `[D-37]`：这看着像少了 2NF/3NF，实际是本节立场的直接应用 —— 角色只有 2 个取值且几乎不变，拆表会在**每个鉴权请求**上多一次 JOIN，而可观测收益为零（没有需要按角色组合查询的报表）。ENUM 单列是原子的，满足 1NF；将来真出现第三种角色，一条 `ALTER TABLE ... MODIFY role ENUM('user','admin','moderator')` 即可，代价可控。**判据：只有当"按角色维度查询"成为真实需求时才拆表。**
 
 ---
 
 ## 4. 题库 JSON Schema
 
-题库文件位于仓库 `problems/<slug>.json`，是**唯一真源**。服务启动时读取并 upsert。
+题库文件位于仓库 `problems/<slug>.json`，是**唯一真源**。服务启动时读取，upsert 入库（§3.2 的 `problems` / `problem_cases` / `problem_params`），并灌入进程内只读缓存供 judge worker 使用。运行期不再读文件。
 
 ### 4.1 完整示例（数组题）
 
@@ -303,6 +460,7 @@ CREATE TABLE submissions (
   "code_template": "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n    vector<int> twoSum(vector<int>& nums, int target) {\n        \n    }\n};",
   "time_limit_ms": 3000,
   "mem_limit_kb": 131072,
+  "harness_prelude": "",
   "cases": [
     {
       "args": [[2, 7, 11, 15], 9],
@@ -317,6 +475,23 @@ CREATE TABLE submissions (
   ]
 }
 ```
+
+**JSON → 库的字段映射**（加载器按此 upsert，数组字段展开为多行，见 §3.4）：
+
+| JSON 路径 | 目标列 | 展开 |
+|---|---|---|
+| `slug` `title` `difficulty` `statement_md` `signature` `method_name` `return_type` `code_template` `time_limit_ms` `mem_limit_kb` `harness_prelude` `is_featured` `sort_no` | `problems.*` 同名列 | 一题一行 |
+| `tags.algorithm[]` / `tags.source[]` | `tags` + `problem_tags` | 按 `category` 分别落 tag 行 |
+| `params[i].name` / `.cpp_type` | `problem_params` | 每形参一行，`param_idx = i` |
+| `cases[i].args` / `.expected` / `.brief` | `problem_cases.args_json` / `.expected_json` / `.brief` | 每用例一行，`case_idx = i` |
+| — | `problems.case_count` | 同步完成后回填为该题用例行数 |
+
+> `harness_prelude` 是**可选**字段，缺省为空串。用到 `__expr` 逃生舱时填所需的前置声明/头文件，如 `"#include \"../common/treedef.h\"\nusing namespace oj;"`（见 §4.2）。
+> 注意：上面的 `statement_md` 为节省篇幅做了缩写（值里有 `...`），因此**整块并非可直接粘贴的合法 JSON**。录入时把 `statement_md` 换成完整的单行转义字符串（换写作 `\n`），其余字段可直接照抄。`cases` / `params` 的结构则是字面准确的。
+
+**同步语义**（`problem/loader.h`，幂等，按 slug）：题库是唯一真源且只增不改，故采用 **delete-then-insert** 而非逐行 upsert —— 先 `DELETE FROM problem_cases WHERE problem_id=?` 与 `DELETE FROM problem_params WHERE problem_id=?`，再按数组顺序整体插入，最后刷新 `case_count`。整个过程单事务。这样"从 JSON 删掉一个用例"能被正确传播到 DB，不会留下幽灵用例行。
+
+> 反向影响：删除用例行会级联影响 `submissions`？不会。`submission_case_results` 存的是快照且无外键指向 `problem_cases`（§3.1），历史提交详情不受题库改动影响。
 
 ### 4.2 字面量映射规则（生成器核心契约）
 
@@ -348,9 +523,11 @@ CREATE TABLE submissions (
 
 ```
 1. 新建 problems/<slug>.json，按 §4.1 填写
-2. 本地起服务 → 启动时自动 upsert 到 MySQL
+2. 本地起服务 → 启动时自动同步到 MySQL（problem_cases / problem_params 按 §4.1 映射表展开）
 3. 打开该题页面提交一次，用官方/自写解法验证 12 个用例全绿
 4. 全绿则录入完成；否则按 judge 日志 /var/log/oj/judge.log 修正 JSON
+5. 若改动了用例内容/数量，重启服务让 DB 与内存缓存刷新
+   （提交历史不受影响：历史存的是快照，见 §3.4）
 ```
 
 ---
@@ -370,19 +547,27 @@ CREATE TABLE submissions (
  │ GET /api/submissions/{id} (每1.5s)                      │          │
  ├───────────▶│ SELECT ◀─────────────────────────────────────────────┤
  │◀─200 {status:"judging"}                                      │    │
- │                          │◀── pop ──────────────────│              │
- │                                                       │ 1.读题+用例  │
- │                                                       │ 2.生成 3 文件 │
- │                                                       │ 3.g++ 编译    │
- │                                                       │ 4.CE? → 写回  │
- │                                                       │ 5.逐用例 fork │
- │                                                       │   setrlimit  │
- │                                                       │   ┌────────▶│ 跑用例
- │                                                       │   │◀───────┘ stderr@@OJ@@
- │                                                       │ 6.写回结果  ─────────────▶│
+│                          │◀── pop ──────────────────│              │
+│                          │                          │ 1.读题+用例  │
+│                          │                          │  (内存缓存)  │
+│                          │                          │ 2.生成 3 文件 │
+│                          │                          │ 3.g++ 编译    │
+│                          │                          │ 4.CE? → 写回  │
+│                          │                          │ 5.逐用例 fork │
+│                          │                          │   setrlimit  │
+│                          │                          │   ┌────────▶│ 跑用例
+│                          │                          │   │◀───────┘ stderr@@OJ@@
+│                          │                          │ 6.单事务写回 ─────────────▶│
+│                          │                          │  UPDATE submissions(汇总列)
+│                          │                          │  + INSERT 用例行 N 条
+│                          │                          │  + INSERT 诊断行 M 条
+│                          │                          │                    │
  │ GET /api/submissions/{id}                     ◀──────┤                       │
  │◀─200 {status:"done", verdict:"WA", caseResults:[...]}│                       │
 ```
+
+> 步骤 1 的用例取自题库加载器灌入的**进程内只读缓存**（内容与 `problem_cases` 一致），不查 DB、不读文件。原因是 worker 无需持 DB 锁（§2.3 的锁顺序约束），且题库运行期不变。
+> 步骤 6 的三次写必须是**同一事务**：汇总列与明细行要么同时生效要么都不生效，否则详情页会出现"通过 2/3"但表里只有 2 行（见 §3.4 的维护契约）。
 
 ### 5.2 工作目录与文件
 
@@ -416,7 +601,7 @@ g++ -std=c++17 -O2 user.o tester.cpp -o run               # 阶段二：链接 h
 
 | 流 | 承载内容 |
 |---|---|
-| **stdout** | 用户代码的所有输出。原样存入 `caseResults[].output` 供用户调试 |
+| **stdout** | 用户代码的所有输出。原样存入 `submission_case_results.output_text` 供用户调试 |
 | **stderr** | 平台元信息。每完成一个用例输出一行 `@@OJ@@<JSON>` |
 
 生成的 harness 逐用例输出：
@@ -474,6 +659,8 @@ long mem_kb = r1.ru_maxrss;        // 进程峰值，非增量
 
 **内存精度限制**：`ru_maxrss` 是**进程生命周期峰值**而非单用例增量，因此第 N 个用例报出的内存是"跑到第 N 个用例为止的最高水位"。首版接受此精度，界面标注"内存为进程峰值"。若后续需要精确值，可改为平台侧 `wait4` 逐用例 fork（成本：每用例多一次 fork）。
 
+**被杀死用例的度量缺失**：度量代码在 harness 内逐用例执行，而 TLE/MLE 的子进程被 `SIGKILL` 杀死，harness 来不及输出该用例的 `@@OJ@@` 行 —— 这类用例的 `time_ms` / `mem_kb` 因此为 NULL（不是 0）。UI 按 §7.2 渲染为"超出时间限制 (3000ms)"跨列显示。存储侧统一用 `COALESCE(...,0)` 收口聚合，理由见 §3.4。
+
 ### 5.6 编译错误解析 `[D-11 衍生]`
 
 解析 g++ 输出，抽取定位信息用于编辑器行号高亮：
@@ -486,17 +673,17 @@ long mem_kb = r1.ru_maxrss;        // 进程峰值，非增量
 
 正则：`^(?<file>[^:]+):(?<line>\d+):(?<col>\d+):\s*(?<sev>error|warning|note):\s*(?<msg>.+)$`
 
-解析结果写入 `compile_errors`：
+解析结果写入 `submission_compile_errors`，每条诊断一行（`seq` 保序）：
 
 ```json
 [{"file":"user.cpp","line":7,"col":20,"severity":"error","message":"'ve' was not declared in this scope"}]
 ```
 
-前端将编辑器对应行号标红，鼠标悬停显示 message，同时面板中展示**原始编译器输出全文**（不解析的 warning/note 也保留）。
+上面是 API 层的呈现形式；DB 中对应两行 `file_name='user.cpp'` / `line=7` / `col=20` / `severity='error'` / `message='ve' was not declared in this scope'`。前端将编辑器对应行号标红，鼠标悬停显示 message，同时面板中展示**原始编译器输出全文**（不解析的 warning/note 也保留）。
 
-**文件路径归一化**：把绝对路径前缀 `/tmp/oj-judge/<id>/` 剥掉，只保留 `user.cpp`，避免向用户暴露服务器目录结构。
+**文件路径归一化**：把绝对路径前缀 `/tmp/oj-judge/<id>/` 剥掉，只保留 `user.cpp`，避免向用户暴露服务器目录结构。归一化后的值直接落 `file_name` 列。
 
-**解析失败降级**：正则未命中的行原样保留在 `compiler_output`，`compile_errors` 只装成功解析的部分，不影响功能。
+**解析失败降级**：正则未命中的行原样保留在 `compiler_output`，`submission_compile_errors` 只装成功解析的部分，不影响功能。
 
 ### 5.7 异步任务状态机
 
@@ -528,6 +715,9 @@ SELECT id FROM submissions WHERE status='pending' ORDER BY id;
 ```
 
 pending 重放的幂等性由设计保证：judge 全流程无外部副作用（不写用户数据、不发通知），重复执行安全。
+
+> **为什么无需清理明细行、也不会撞唯一键**：`status` 的迁移与明细行插入在**同一事务**内（T2.11），InnoDB 保证全提交或全回滚。因此可以证明：`status ∈ {pending, judging}` 的 submission **恒有 0 条明细行**。恢复逻辑只需 UPDATE `submissions` 本身，而重新评测时 `uk_sub_case` 上不可能存在冲突行。
+> 这条推论是 T2.11 单事务写回的直接副产品 —— **若哪天把写回改成分批提交，必须同时在本节补上明细行清理逻辑**，否则会出现"判题中"的提交带着上一次重放的残留结果。
 
 ### 5.8 配额与限流 `[D-22]`
 
@@ -620,6 +810,7 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 | 1007 | 429 | 配额超限 | 单用户同时评测数超限 |
 | 1008 | 500 | 服务器内部错误 | DB 异常、未捕获异常 |
 | 1009 | 503 | 判题服务不可用 | judge 调度器未启动/队列满 |
+| 1010 | 403 | 注册已关闭 | `OJ_ALLOW_REGISTER=0` 时的注册请求 `[D-37]` |
 | 2001 | 200 | 编译错误 | verdict=CE，非 API 错误 |
 | 2002 | 200 | 运行超时 | verdict=TLE |
 | 2003 | 200 | 内存超限 | verdict=MLE |
@@ -634,10 +825,90 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 
 | Method | Path | Auth | 说明 |
 |---|---|---|---|
-| POST | `/api/auth/register` | 否 | `{username, password}` → `201 {userId, username}` |
-| POST | `/api/auth/login` | 否 | `{username, password}` → `Set-Cookie: sid=...; HttpOnly; SameSite=Lax; Path=/` + `{userId, username}` |
+| POST | `/api/auth/register` | 否 | `{username, password}` → `201 {userId, username, role}`。**先查 `OJ_ALLOW_REGISTER`**，为 0 时返回 1010 且不落库。提权规则见下方 §6.3.1 |
+| POST | `/api/auth/login` | 否 | `{username, password}` → `Set-Cookie: sid=...; HttpOnly; SameSite=Lax; Path=/` + `{userId, username, role}`。**顺带触发过期会话回收**（§6.3.2） |
 | POST | `/api/auth/logout` | 否 | 删除会话行，清 Cookie |
-| GET | `/api/auth/me` | 是 | `{userId, username}`；未登录返回 401 |
+| GET | `/api/auth/me` | 是 | `{userId, username, role}`；未登录返回 401 |
+
+#### 6.3.1 首个用户自动提权 `[D-37]`
+
+**规则**：注册时若 `users` 表为空，该用户 `role='admin'`；否则 `role='user'`。
+
+**为什么需要它**：这是角色系统唯一的硬性必要性 —— 一个支持角色的系统必须有一条路径来指定"谁是管理员"，否则 `role` 列永远是 `user`，整列失去意义。除此之外本项目**没有**任何 admin 相关端点（见 §1.2 的澄清）。
+
+**并发安全**：上面那句规则字面执行是**有竞态的** —— 两个并发注册请求都可能观察到 `COUNT(*)=0`，从而产生**两个 admin**。MySQL 的默认隔离级别（`REPEATABLE READ`）挡不住，因为两条语句在各自事务的一致性视图里都合法。
+
+**解法**：用 MySQL 的**命名 advisory lock** 把「查表 + 插入」串行化。
+
+```sql
+-- ① 取锁。返回 1=拿到，0=超时，NULL=出错（如 5.6 以下不支持多锁）
+SELECT GET_LOCK('oj_bootstrap_admin', 5);
+-- ② 若拿到 1：在单事务内完成判定与插入
+START TRANSACTION;
+SELECT COUNT(*) INTO @is_first FROM users;
+INSERT INTO users (username, password_hash, role, created_at)
+  VALUES (?, ?, IF(@is_first = 0, 'admin', 'user'), NOW());
+COMMIT;
+-- ③ 释放。必须与 ① 同一连接，否则锁不归你
+SELECT RELEASE_LOCK('oj_bootstrap_admin');
+```
+
+**实现约束（4 条，缺一不可）**：
+
+1. **同一连接**：`GET_LOCK` 是**连接级**（session-scoped）而非事务级。DAO 若每次调用都换连接，② 里的 `COMMIT` 不会释放锁、③ 也 `RELEASE_LOCK` 不掉。**取锁到释放必须在同一个 `MYSQL*` 上完成**。
+2. **必须释放，且要兜底**：用 RAII（析构函数里 `RELEASE_LOCK`）而不是顺序语句。异常路径（bcrypt 失败、用户名重复、INSERT 报错）若漏了释放，这个锁会一直挂着，后续所有注册请求都在 5s 超时上失败 —— 表现为"注册功能彻底坏掉且原因难查"。
+3. **MySQL ≥ 5.7.5**：低版本一条连接同时只能持有一个命名锁，新 `GET_LOCK` 会静默释放旧锁。本项目固定 MySQL 8.0（D-18/D-33），不受影响，但锁名应带模块前缀（`oj_`）以免与其他子系统撞名。
+4. **超时值 5s**：拿不到锁时**不要重试**，直接返回 500/1008 并在日志记 `"bootstrap lock timeout"`。锁只持有几毫秒，5s 还拿不到说明有别的问题。
+
+> **为什么不用全局 `DB mutex` 兜住**：§2.3 的全局互斥量其实已经能覆盖这个竞态（只要注册全程持锁）。选 `GET_LOCK` 的理由是**把不变量收进数据层**，不依赖调用方是否记得跨多个 DAO 调用持有互斥量 —— 后者是纪律性约束，纪律会失效，而 `GET_LOCK` 是数据库强制的。代价是注册路径多一次命名锁往返（可忽略）。
+
+**唯一恢复路径**：管理员密码丢失且无法找回时，没有自助页面，只能走 shell（§5.4 已假定操作者有 shell）：
+
+```bash
+docker compose exec mysql mysql -uoj -poj oj \
+  -e "UPDATE users SET role='admin' WHERE username='someone';"
+```
+
+**不做的事**（ conscious omission，v1.2 内 `role` 不参与任何放行决策）：无管理后台、无题库在线编辑（与 D-30「题库 JSON 唯一真源 + 改题需重启」冲突，见 §6.3.3）、admin 不绕过「仅本人」查看他人提交（§5.4 已承认用户持 shell 可直连 MySQL，故"admin 能看全部"不构成安全边界，只是运维便利）、无用户禁用/删除、无注册审核或邀请码。
+
+#### 6.3.2 过期会话惰性回收
+
+**问题**：`sessions` 表有 `expires_at` 与 `idx_expire` 索引，但若没有回收任务，该索引**没有任何查询会用到**，表只增不减 —— 浏览器关掉后其会话行永久驻留。logout 只删自己那一行。
+
+**方案：惰性回收**（不引入定时器、不新增线程）
+
+| 触发点 | 动作 |
+|---|---|
+| 服务启动时 | 删一次全部过期会话 |
+| 每次 `POST /api/auth/login` 成功路径 | 删一次全部过期会话 |
+
+```sql
+DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP();
+```
+
+**为什么惰性够用**：这张表**只因登录而增长**。没人登录时既没有新增行、也没有需要回收的行。所以"登录时顺手清"能覆盖全部实际增长场景 —— 唯一残留情况是"最后一次登录之后长期不再使用"，此时那批行的增速也恰好是零。
+
+**为什么不用定时器/线程**：
+
+- 独立线程：2 核机器上多一个常驻线程，换来的确定性对单机自用无价值。
+- 复用调度线程的 `wait_for(1h)`：零线程，但把"会话回收"和"判题调度"耦在一起，§2.3 的线程职责会变模糊。
+
+**执行位置与约束**：
+
+- 走**同一个全局 `DB mutex`**（§2.3），不要绕开。注意回收发生在登录路径内，**必须在插入新会话行的同一事务之外或之内均可，但不可在持有 `DB mutex` 时再去抢 `GET_LOCK`**（锁顺序风险）。
+- `idx_expire` 正是为这条语句设计的，**无需新增索引**（`EXPLAIN` 应为 `type=range`）。
+- `expires_at` 与 `created_at` 存 UTC（§1.4 / D-17），故比较用 `UTC_TIMESTAMP()` 而非 `NOW()`，避免容器时区不是 UTC 时误删未过期会话。**这是本条唯一的正确性要点。**
+- 回收是 `DELETE` 而非 `SELECT` 后删，表小（个人量级）且有索引，单条语句足够。
+- 失败**不影响登录**：回收异常仅记日志，登录照常返回。
+
+#### 6.3.3 为什么不做题库在线编辑
+
+若将来加管理后台，"在线编辑题目与用例"是最直觉的功能，但它直接违反 D-30 与 §2.2：题库 JSON 是**唯一真源**，且"运行时改题需重启"。在线编辑必须先回答一个问题：**改完写回 JSON 文件，还是让 DB 变成第二真源？**
+
+- 写回 JSON：与 §5.2"题库代码永不改动"的安全边界冲突，且在容器内改宿主文件带来部署耦合。
+- DB 为第二真源：需要新增"哪边优先"的仲裁、版本化与冲突检测 —— 远超单机工具的复杂度。
+
+在这个问题有明确答案之前，此功能**不进 v1.2**。
 
 **题目**
 
@@ -655,6 +926,23 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 | POST | `/api/submissions` | 是 | `{problemSlug, language, code}` → `201 {submissionId, status:"pending"}` |
 | GET | `/api/submissions/{id}` | 是（仅本人） | `{id, status, verdict, message, caseResults, compileErrors, compilerOutput, casePassed, caseTotal, totalMs, maxMemKb, code, createdAt}` |
 | GET | `/api/submissions` | 是（仅本人） | query: `problemSlug` `verdict` `page` `size` → `{list:[...], total, ...}` |
+
+**提交详情的数据组装**（`GET /api/submissions/{id}`）：
+
+```
+1. SELECT * FROM submissions WHERE id=?              → id/status/verdict/message/
+                                                        casePassed/caseTotal/totalMs/
+                                                        maxMemKb/compilerOutput/code/createdAt
+2. SELECT case_idx, verdict, passed, args_text, output_text,
+          expected_text, time_ms, mem_kb, error_msg
+   FROM submission_case_results
+   WHERE submission_id=? ORDER BY case_idx ASC        → 序列化为 caseResults[]
+3. SELECT file_name, line, col, severity, message
+   FROM submission_compile_errors
+   WHERE submission_id=? ORDER BY seq ASC            → 序列化为 compileErrors[]
+```
+
+三步都是预处理语句（§1.4 强制要求），字段名与行名一一对应，**API 契约对前端不变** —— 拆表是服务端实现细节。前端只感知 `caseResults` / `compileErrors` 两个数组，无需改动。步骤 1 的四个汇总列直接取用，不必在应用层从步骤 2 的行里现算（§3.4 的受控反范式）。
 
 **统计**
 
@@ -700,6 +988,8 @@ FROM problems p ...
 | 提交历史 | `/history.html` | 全局历史 + 筛选 + 展开详情 |
 
 页面间用普通 `<a>` 链接跳转。每个页面独立引入所需 JS 模块，无构建步骤、无框架。
+
+> **v1.2 不新增页面，仍是这四个** `[D-37]`。`role` 的加入不改变任何前端行为：`auth/me` 多返回一个 `role` 字段，但 v1.2 内没有任何 admin 专属 UI，所以前端无需据此隐藏或显示任何入口。`OJ_ALLOW_REGISTER=0` 时 `login.html` 的注册 tab 仍显示，用户提交后收到 1010 的明确报错 —— 接受这个体验，不加"探测注册是否开放"的额外端点。
 
 ### 7.2 题目详情页布局 `[D-26]`
 
@@ -795,47 +1085,66 @@ FROM problems p ...
 
 - [ ] T0.1 目录骨架 + `docker-compose.yml`（mysql + oj 双容器，volumes，healthcheck）
 - [ ] T0.2 `Dockerfile`：基于 `ubuntu:22.04`，装 `g++-12`、MySQL Connector、cmake、bash
-- [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL）
+- [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，11 张表，注意外键依赖顺序：`problems`/`users`/`tags` 须先建）
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
+  - `config.h` 新增 `OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）`[D-37]`
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
 - [ ] **验收**：`docker compose up` 后浏览器访问 `localhost:8080` 看到页面；`/var/log/oj/app.log` 正常输出
 
 ### M1 — 题库与生成器（Day 3–6）★ 最高风险
 
 - [ ] T1.1 `nlohmann/json` 引入 + `problems/two-sum.json` 首个样例题
-- [ ] T1.2 `problem/loader.h`：读目录 → 校验必填字段 → upsert MySQL（幂等，按 slug）
+- [ ] T1.2 `problem/loader.h`：读目录 → 校验必填字段 → 同步 MySQL（幂等，按 slug）
+  - `cases[]` / `params[]` 数组按 §4.1 映射表**展开为多行**写入 `problem_cases` / `problem_params`
+  - 同步用 delete-then-insert 单事务语义，保证 JSON 删用例能传播（不留幽灵行）
+  - 同步完成后同事务回填 `problems.case_count`
+  - 全部入库后灌入进程内只读缓存（结构体含 statement/signature/params/cases），供 judge worker 使用
 - [ ] T1.3 `judge/generator.h` 核心：JSON 值 → C++ 字面量转换器（含字符串转义）
-- [ ] T1.4 类型推导：从 `params[].cpp_type` 推导数组嵌套层数
+- [ ] T1.4 类型推导：从 `problem_params.cpp_type` 推导数组嵌套层数
 - [ ] T1.5 生成 `solution_decl.h` / `tester_util.h` / `tester.cpp`
-- [ ] T1.6 `__expr` 逃生舱 + `harness_prelude` 支持
+- [ ] T1.6 `__expr` 逃生舱 + `problems.harness_prelude` 支持
 - [ ] T1.7 单元测试：`tests/gen_test.cpp` 覆盖 int/string/vector/vector2d/嵌套/转义/空数组
 - [ ] **验收**：给定 two-sum.json，生成的 tester.cpp 手写答案后能编译通过并输出 `@@OJ@@` 协议行
+- [ ] **验收**：改 JSON 删掉第 3 个用例后重启，`problem_cases` 只剩 2 行且 `case_count=2`（验证同步语义）
 
 ### M2 — 判题引擎（Day 7–10）
 
 - [ ] T2.1 `judge/compiler.h`：`alarm` 超时 + 两阶段编译 + 输出捕获
-- [ ] T2.2 g++ 输出正则解析 → `compile_errors` JSON，路径归一化
+- [ ] T2.2 g++ 输出正则解析 → `submission_compile_errors` 行（`seq` 保序），路径归一化
 - [ ] T2.3 `judge/runner.h`：fork + `setpgid` + setrlimit 五项 + stdin 重定向
 - [ ] T2.4 `wait4` 回收 + 墙钟保险阀（`SIGKILL` 进程组）+ 退出码→verdict 映射
-- [ ] T2.5 `@@OJ@@` stderr 协议解析 → `case_results`
+- [ ] T2.5 `@@OJ@@` stderr 协议解析 → `submission_case_results` 行
 - [ ] T2.6 结果比较器：trim、数组空白归一、浮点容差
 - [ ] T2.7 `judge/queue.h` + `scheduler.h`：内存 FIFO + 4 worker 条件变量 + 并发闸门
 - [ ] T2.8 启动恢复逻辑（§5.7 的两条 SQL）
 - [ ] T2.9 工作目录生命周期：创建/清理/启动时扫残
 - [ ] T2.10 judge 日志：`/var/log/oj/judge.log` 记录生成代码、编译命令、进程退出原因
+- [ ] T2.11 写回事务：`UPDATE submissions`(四个汇总列 + status) + `INSERT` 用例行 + `INSERT` 诊断行必须同事务；失败则整条 submission 置 `failed`/`JE`
+  - `status` 迁移与明细行必须同事务 —— §5.7 的恢复逻辑依赖此不变量（证明见该节注释）
 - [ ] **验收**：特制题目覆盖 6 种 verdict（AC/WA/TLE/MLE/RE/CE），逐个通过
 
 ### M3 — API 层（Day 11–13）
 
 - [ ] T3.1 `db/mysql_pool.h` + 互斥量串行化；所有 DAO 用预处理语句（**禁止字符串拼接 SQL**）
-- [ ] T3.2 DAO：`user` `problem` `tag` `submission` 四组 CRUD
+- [ ] T3.2 DAO：`user` `problem` `problem_case` `problem_param` `tag` `submission` `submission_case_result` `submission_compile_error` 八组
 - [ ] T3.3 认证：bcrypt 注册/校验 + 64 hex token 会话 + HttpOnly Cookie
+  - 注册路径按 §6.3.1 实现首用户提权：`GET_LOCK('oj_bootstrap_admin',5)` 包住「查表 + 插入」
+  - 4 条实现约束逐条落地：同连接取锁与释放、RAII 兜底释放、锁名带 `oj_` 前缀、超时直接 1008 不重试
+  - `register` / `login` / `me` 三个响应体追加 `role` 字段
+  - `register` 入口先查 `OJ_ALLOW_REGISTER`，为 0 时返回 1010 且不落库
 - [ ] T3.4 限流器：每用户 60s 滑动窗口 + 同时评测数配额
 - [ ] T3.5 路由：§6.3 全部端点 + 统一包络 + 错误码映射
 - [ ] T3.6 列表查询：多条件筛选 + 分页 + JOIN 进度与收藏
 - [ ] T3.7 提交端点：校验 → 落库 pending → 入队 → 返回 201
-- [ ] T3.8 提交详情端点：仅本人可见 + 组装 caseResults
-- [ ] T3.9 启动顺序：DB 就绪 → 校验/建表 → 加载题库 → 启动 judge → listen
+- [ ] T3.8 提交详情端点：仅本人可见 + 按 §6.3 的三步组装 `caseResults` / `compileErrors`
+  - `submission_case_results` 按 `case_idx ASC`；`submission_compile_errors` 按 `seq ASC`
+  - 字段名映射为 API 契约里的 camelCase，**前端零改动**
+- [ ] T3.9 启动顺序：DB 就绪 → 校验/建表 → 加载题库（同步入库 + 灌缓存）→ 启动 judge → listen
+  - 建表之后、加载题库之前，跑一次过期会话回收（§6.3.2）
+- [ ] T3.10 过期会话回收（§6.3.2）：启动时一次 + 每次登录时一次，`DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP()`
+  - **必须用 `UTC_TIMESTAMP()` 而非 `NOW()`** —— 容器时区非 UTC 时会误删未过期会话
+  - 复用同一个全局 `DB mutex`；回收失败仅记日志，不阻断登录
+  - `EXPLAIN` 确认走 `idx_expire`（期望 `type=range`），无需新增索引
 - [ ] **验收**：`curl` 走通注册→登录→列表→提交→轮询→历史全链路
 
 ### M4 — 前端（Day 14–17）
@@ -860,6 +1169,14 @@ FROM problems p ...
 - [ ] T5.1 录入 20 道覆盖高频题型的题（数组/哈希/双指针/链表/树/二分/动态规划/贪心）
 - [ ] T5.2 补齐到 50 道（视进度）
 - [ ] T5.3 `tests/run_tests.sh` 自动化验收脚本
+  - **派生列一致性断言**（§3.4 的维护契约）：对每条 `status='done'` 的提交，用 §3.4 给出的
+    `HAVING` 查询校验 `case_passed` / `case_total` / `total_ms` / `max_mem_kb` 四个汇总列，
+    返回行数必须为 0。**必须包含至少一条含 TLE 或 MLE 用例的提交** —— 那类用例的
+    `time_ms`/`mem_kb` 为 NULL，是 `COALESCE` 约定唯一能被真正验证的路径。
+  - **无残留多值断言**：`submissions` 表不存在 `case_results` / `compile_errors` 列
+  - **首用户提权断言** `[D-37]`：清空 `users` 后连续注册 3 个账号，`SELECT COUNT(*) FROM users WHERE role='admin'` 恒等于 1，且该行的 `id` 为 1、`username` 为首个注册者
+  - **并发提权断言** `[D-37]`：清空 `users` 后并发发起 N=8 个注册请求，结束后 `COUNT(*) WHERE role='admin'` 仍为 1（证明 `GET_LOCK` 关闭了竞态）
+  - **会话回收断言**：插入若干 `expires_at` 分别为过去/未来的会话行，触发一次登录后 `SELECT COUNT(*) FROM sessions WHERE expires_at < UTC_TIMESTAMP()` 为 0，且未过期行数不变
 - [ ] T5.4 压力测试：10 并发提交 × 20 轮，验证无崩溃、无永久 pending
 - [ ] T5.5 恶意输入测试：死循环 / 内存炸弹 / 超长输出 / fork bomb / 空代码
 - [ ] T5.6 README：架构说明、启动方式、题库编写指南
@@ -878,8 +1195,8 @@ FROM problems p ...
 | AC-4 | 代码编辑 | CodeMirror 加载成功，有 C++ 高亮与行号；刷新后草稿恢复；切题再切回草稿仍在 |
 | AC-5 | 提交判题 | 提交后 1.5s 内页面显示"评测中"；正确答案 verdict=AC 且用例全绿 |
 | AC-6 | 六种 verdict | 特制题目分别触发 AC/WA/TLE/MLE/RE/CE，`verdict` 与 `message` 均正确 |
-| AC-7 | 逐用例详情 | 失败时表格展示每个用例的输入/你的输出/期望输出/耗时/内存，值与实际一致 |
-| AC-8 | 编译错误定位 | 故意写语法错误，`compile_errors` 正确给出行号，编辑器对应行高亮，面板显示原始 g++ 输出 |
+| AC-7 | 逐用例详情 | 失败时表格展示每个用例的输入/你的输出/期望输出/耗时/内存，值与实际一致；DB 中 `submission_case_results` 行数 = `case_total` |
+| AC-8 | 编译错误定位 | 故意写语法错误，`compileErrors` 正确给出行号，编辑器对应行高亮，面板显示原始 g++ 输出 |
 | AC-9 | 资源限制 | 死循环题判 TLE；`vector` 无限增长的题判 MLE；超大输出被 `RLIMIT_FSIZE` 拦截不撑爆磁盘 |
 | AC-10 | 提交历史 | 全局历史页能按题目/verdict 筛选；展开能看到代码全文与逐用例详情；题目页显示最近 5 次 |
 | AC-11 | 进度推导 | 通过过的题在列表页标记"已通过"；仅编译错误的题标记"尝试过"；从未提交的标记"未开始" |
@@ -887,6 +1204,10 @@ FROM problems p ...
 | AC-13 | 鉴权边界 | 未登录访问 `/api/submissions` 返回 1002；用户 A 访问用户 B 的提交详情返回 1003 |
 | AC-14 | 限流配额 | 单用户同时提交第 3 个时返回 1007；每分钟超 10 次返回 1006 |
 | AC-15 | 重启恢复 | 手动 `docker compose restart`，重启后无永久"评测中"的任务，pending 任务被重新评测 |
+| AC-16 | 用例落库与范式 | `problem_cases` 行数 = JSON `cases` 长度，`case_count` 与之一致；`problem_params` 与 `params` 长度一致；JSON 删用例后重启不残留幽灵行；`submissions` 表无多值 JSON 列 |
+| AC-17 | 过期会话回收 | 构造若干已过期会话行，触发一次登录（或重启服务）后过期行被删除、未过期行不受影响；`NOW()` 与 `UTC_TIMESTAMP()` 混用导致的误删**必须**被测试覆盖（见 T3.10） |
+| AC-18 | 最小角色与注册开关 `[D-37]` | 首个注册用户 `role='admin'`，其后续注册用户均为 `user`；8 路并发注册后仍只有一个 admin；`OJ_ALLOW_REGISTER=0` 时注册返回 1010 且 `users` 行数不变；`auth/me` 返回 `role` |
+| AC-19 | v1.2 无新增页面 `[D-37]` | 页面集合仍为 login / list / problem / history 四页；`role` 不导致任何前端入口出现或消失；前端文件零改动即可通过 AC-1~AC-16 |
 
 ### 10.2 非功能验收
 
@@ -897,7 +1218,7 @@ FROM problems p ...
 | NF-3 | 并发稳定性 | 10 用户 × 20 轮并发提交，进程无崩溃、无内存泄漏（RSS 增长 < 10%）、无永久 pending |
 | NF-4 | 资源无泄漏 | 压测后 `/tmp/oj-judge/` 为空，僵尸进程数为 0，磁盘占用平稳 |
 | NF-5 | 日志 | `app.log` 与 `judge.log` 均正常写入，按天切割；judge 日志含生成代码与编译命令 |
-| NF-6 | 数据持久化 | `docker compose down && up` 后用户、题目、提交历史、收藏全部保留 |
+| NF-6 | 数据持久化 | `docker compose down && up` 后用户、题目、用例、提交历史（含逐用例结果行）、收藏全部保留 |
 | NF-7 | SQL 注入 | 对所有字符串入参做注入测试（`' OR 1=1--`），无异常无绕过 |
 | NF-8 | 机器稳定 | 连续运行 24 小时，judge 队列无卡死，HTTP 无 5xx 堆积 |
 
@@ -909,6 +1230,7 @@ FROM problems p ...
 | AR-2 | 生成器 | 能讲清"为什么用户代码与 harness 分两阶段编译"以及签名不匹配为何在链接期暴露 |
 | AR-3 | 线程模型 | 能说明为什么 DB 用全局互斥量而 judge 用独立 worker 池，以及为什么不加大 worker 数 |
 | AR-4 | 度量精度 | 能主动说明 `ru_maxrss` 是进程峰值而非单用例增量的精度限制 |
+| AR-5 | 范式取舍 | 能讲清"为什么逐用例结果要拆表（1NF 的一格多值）"，以及"为什么结果表存快照而不外键引用 `problem_cases`"——后者是业务需求（历史可回放）压过范式纯洁性的例子 |
 
 ---
 
