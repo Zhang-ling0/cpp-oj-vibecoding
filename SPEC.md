@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.5（审计修复：阻塞判定 / 内存口径 / 报错归属 / 用例数语义） |
+| 版本 | v1.6（环境落地：路线 A 原生构建 / vendored 前端 / 资源下调） |
 | 日期 | 2026-10-02 |
 | 状态 | 规格已确认，进入实施 |
 | 交付周期 | 3 周 |
@@ -11,7 +11,7 @@
 
 ## 0. 决策溯源
 
-本文档由 70 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
+本文档由 75 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
 
 | # | 决策 | # | 决策 |
 |---|---|---|---|
@@ -25,7 +25,8 @@
 | D-08 | 用例类型：按题声明 + 结构化字面量 | D-26 | 布局：题目页左右分栏 |
 | D-09 | 反馈粒度：逐用例全量详情 | D-27 | 草稿：localStorage 自动保存 |
 | D-10 | 判题模式：异步任务 + 前端轮询 | D-28 | 提交：预置模板 + 提交前校验 |
-| D-11 | 资源限制：贴近 LeetCode 严格值（**⚠️ 内存为 AS 口径，比 LeetCode 的 RSS 口径更严，见 §5.5.1 `[D-63]`**） | D-29 | 错误码：数字业务码 + 同步 HTTP 状态码 || D-12 | 度量：CPU 时间 + ru_maxrss | D-30 | 题库文件为源，启动时同步入库 |
+| D-11 | 资源限制：贴近 LeetCode 严格值（**⚠️ 内存为 AS 口径，比 LeetCode 的 RSS 口径更严，见 §5.5.1 `[D-63]`**） | D-29 | 错误码：数字业务码 + 同步 HTTP 状态码 |
+| D-12 | 度量：CPU 时间 + ru_maxrss | D-30 | 题库文件为源，启动时同步入库 |
 | D-13 | 工具链：g++ 12 / C++17 / -O2 -Wall | D-31 | 提交历史：代码全文 + 逐用例结果全存 |
 | D-14 | 题面：Markdown + 前端渲染 | D-32 | 前端：多页应用 |
 | D-15 | 分类：难度 + 算法标签 + 来源标签 | D-33 | 容器：mysql + oj 双容器 |
@@ -54,6 +55,10 @@
 | D-64 | 平台生成文件的编译错误**归属题库**，不提供行高亮 | D-68 | 推荐算法的**主标签选取规则**（取最薄弱标签） |
 | D-65 | **CE 时 `case_total` = 题库用例数**，非 0 | D-69 | CSRF 论述补齐（依赖 `SameSite=Lax` 隐式防护） |
 | — | — | D-70 | 注销时清理内存限流计数器 |
+| — | — | **D-71 ~ D-75（v1.6 环境落地轮）** | |
+| D-71 | 部署走**路线 A：宿主机原生构建**；Docker 降为可选目标形态 | D-73 | 前端三库 **vendored** 到 `static/vendor/`，不再运行时引 CDN |
+| D-72 | cpp-httplib 用 **apt 的 0.14.3**（`/usr/include/httplib.h`，无 `-I`） | D-74 | 按实测资源下调：**worker 2 / 全局闸门 4** |
+| — | — | D-75 | 密码哈希走 **OpenSSL Blowfish**（24.04 官方源无 `libbcrypt-dev`） |
 
 > **D-38 ~ D-41 的共同取向：只加数据，不加页面。** 个人主页所需的统计、分类掌握度、账户信息三类需求，数据全部已存在于 `submissions` / `users` / `problem_tags`，**因此不需要新表、不需要新列、不需要新页面** —— 只缺聚合端点与展示位。故 `§3.2` 的 DDL 在 v1.3 **完全不变**，页面总数仍为五页。
 
@@ -67,7 +72,19 @@
 
 > **D-62 ~ D-70 是对抗性审计修复轮**。做法是对 v1.4 做一次"假设它会出错"的推演，找出 **4 个会必然产生错误判定的硬漏洞**（§8.1.1 详列）与 6 个文档不一致/未定义。修复的一处通则值得记下：
 >
-> > **多数漏洞的根源不是"没做"，而是"两处各自合理的设计放在一起就矛盾"。** 例如墙钟保险阀（`time_limit_ms × 2 + 1s`）与全局并发闸门 8 各自都说得通 —— 前者想卡住 `sleep(999)`，后者想用满 CPU —— 但 2 核 8 并发下墙钟被放大 8 倍，**前者会系统性地杀死后者正在拼命工作��合法进程**。这类问题读文档时看不出来，必须把两个数字代进去算一遍才暴露。
+> > **多数漏洞的根源不是"没做"，而是"两处各自合理的设计放在一起就矛盾"。** 例如墙钟保险阀（`time_limit_ms × 2 + 1s`）与全局并发闸门 8 各自都说得通 —— 前者想卡住 `sleep(999)`，后者想用满 CPU —— 但 2 核 8 并发下墙钟被放大 8 倍，**前者会系统性地杀死后者正在拼命工作的合法进程**。这类问题读文档时看不出来，必须把两个数字代进去算一遍才暴露。
+
+> **D-71 ~ D-75 是环境落地轮**。起因是"把 SPEC 拿到真实机器上跑"时做了一次依赖清点，暴露出**三处文档假设与现实不符**：
+>
+> | 文档假设 | 实测 | 处置 |
+> |---|---|---|
+> | D-33 双容器是唯一部署形态 | Docker 已装但**用户不在 `docker` 组** → socket `permission denied` | `D-71` 路线 A 为主，B 保留 |
+> | §6.2 依赖表有 bcrypt | **24.04 官方源无 `libbcrypt-dev`** | `D-75` 走 OpenSSL Blowfish |
+> | §6.2「CodeMirror 5」一条依赖 | 实测 `codemirror.min.js` **不含任何语言模式**（grep `clike` = 0） | `D-73` 拆成 5 个文件条目 |
+>
+> 附带两处按实测环境做的选型调整：`D-72`（cpp-httplib 锁 apt 版）与 `D-74`（worker/闸门按实测资源下调）。完整清单见 **§6.7**，一键脚本见 **附录 A**。
+>
+> **这一轮的取向**：环境问题**不回头改架构**。DDL、判题流水线、API 契约、错误码**全部零变更** —— 路线 A 与路线 B 的差别只在"谁负责拉起 mysqld 与 g++"，不触及任何业务逻辑。
 
 ---
 
@@ -122,11 +139,11 @@
 | 维度 | 要求 |
 |---|---|
 | 性能 | 页面加载 < 1s；提交到拿到结果 P95 < 8s（10 用例以内）；列表查询 P95 < 200ms |
-| 并发 | 支持 10 个用户同时提交；全局同时评测数硬上限 8；单用户同时评测数上限 2 |
+| 并发 | 支持 10 个用户同时提交；**全局同时评测数硬上限 4** `[D-74]`；单用户同时评测数上限 2 |
 | 可靠性 | 服务重启后不出现永久"评测中"的任务；judge 进程崩溃不拖垮主进程 |
 | 安全 | 用户代码不可读文件系统（除自身工作目录）、不可无限 fork、不可超限占用内存/CPU/磁盘；所有 SQL 走预处理语句；注册可一键关闭（`OJ_ALLOW_REGISTER=0`）；管理员由 `.env` 的 `OJ_ADMIN_USERNAMES` 声明（`users.role`），`/api/admin/*` 需 `role='admin'` |
 | 可观测 | 应用日志与 judge 日志分文件、按天切割、保留 7 天 |
-| 成本 | 单机 2 核 4G 可稳定运行，无额外中间件（无 Redis / MQ） |
+| 成本 | **双档** `[D-74]`：**功能验证 ≥ 2G**（2 核实测机）/ **性能验收 4G**（NF-1 ~ NF-4 与 AC-38 必须在 4G 机器上跑，见 §6.7.1）。无额外中间件（无 Redis / MQ） |
 | 兼容性 | 桌面 Chrome/Edge/Safari 最近两个大版本；1280px 以上宽度 |
 
 > **v1.3 补充的两条非功能约束** `[D-40]`：改密码端点必须做到「**改密后当前会话仍有效**」（否则用户把自己踢下线，体验等同于登出失败）；`GET /api/me/overview` 的聚合成本必须让首页概览条保持 **P95 < 200ms**，因此该端点**不得**为了图省事而全表捞 `submissions` 回应用层聚合（聚合必须在 SQL 内完成，理由见 §6.5）。
@@ -137,54 +154,126 @@
 > 2. **注销必须"不可逆"这件事对用户可见** `[D-57]`。硬删意味着误操作无法挽回，因此二次确认弹窗必须**逐项列出**将被删除的数据（提交 N 条 / 收藏 M 题 / 会话 K 个），而不是一句"确定吗？"。这是硬删除方案能成立的**唯一前提**。
 > 3. **队列位置不得泄露全局负载** `[D-60]`。只返回"你前面还有 N 个"（你自己在队列中的序号），不返回全局队列长度、不含任何其他用户信息。理由见 §6.3.6。
 
+> **v1.6 的资源下调声明** `[D-74]`：目标开发机实测 **2 核 / 1967MB**（§6.7.1），而 v1.0 假定的 4G 机器上 `worker 4 × 闸门 8` 会让 judge 与 HTTP 线程争抢内存。处置：
+>
+> | 参数 | 原值 | 现值 | 依据 |
+> |---|---|---|---|
+> | Judge Worker 数 | 4 | **2** | 每 worker 可派生 2 个子进程（闸门 4 ÷ 2），2 核下 4 worker 会自相争抢 |
+> | 全局并发闸门 | 8 | **4** | 与 worker 数匹配（闸门 2×worker），且给 HTTP 线程池留出余量 |
+> | 内存档位 | 单档 4G | **双档** | 2G 只保证**功能**正确；**性能类验收（NF-1~NF-4、AC-38）必须在 4G 机器上做**，本机跑出来的延迟数字不可信 |
+>
+> **连带重算的只有一处**：§5.4.2 的兜底墙钟 `×10 + 5000`（默认 35s）。闸门 8→4 使墙钟放大倍数从 8 降到 4（3s × 4 = 12s），**余量从 1.46 倍升到 2.9 倍 —— 变安全了，不需要下调系数**。详见 §5.4.2 的关系式。
+
 ---
 
 ## 2. 架构
 
 ### 2.1 系统总览
 
+**两条部署路线并存** `[D-71]`。差别只在"**谁负责拉起 mysqld 与 g++**" —— 判题流水线、API 契约、数据模型**三者完全相同**，因此 C++ 代码里不需要任何 `#ifdef DEPLOY_MODE` 分支，只有启动脚本不同（§9 T0.1）。
+
+| | 路线 A（宿主机原生） | 路线 B（Docker Compose） |
+|---|---|---|
+| 地位 | **当前开发/交付形态** | **目标形态**（可复现部署） |
+| httplib + judge | 宿主机进程 | `oj` 容器 |
+| MySQL | 宿主机 `mysqld` | `mysql` 容器 |
+| g++ | 宿主机 `g++-12` | 容器内 `g++-12` |
+| 建表方式 | 应用启动时幂等 `CREATE TABLE IF NOT EXISTS` | initdb 脚本 + 同样的兜底 |
+| 日志 | `./logs/` | volume → `/var/log/oj` |
+| 适用 | 开发迭代、单人长期使用 | 交付给他人、避免污染宿主环境 |
+
+#### 2.1-A 路线 A：宿主机原生（当前）
+
+```
+┌────────── Ubuntu 24.04 宿主机（实测 2 核 / 1967MB） ──────────┐
+│                                                                │
+│  ┌───────── ./oj 进程 ───────────────────────────────────┐    │
+│  │                                                         │    │
+│  │  ┌──────────────┐        ┌─────────────────────────┐   │    │
+│  │  │ HTTP 线程池   │        │  Judge 调度器 (1 线程)   │   │    │
+│  │  │ cpp-httplib  │        │   内存 FIFO 队列         │   │    │
+│  │  │  (N=8)       │───────▶│   启动恢复 pending       │   │    │
+│  │  │  - 静态文件   │  入队   │   全局闸门(4) / 用户(2) │   │    │
+│  │  │  - REST API  │        └──────────┬──────────────┘   │    │
+│  │  │  - Session   │                   │ 分发             │   │    │
+│  │  └──────┬───────┘                   ▼                 │   │    │
+│  │         │            ┌──────────────────────────┐     │   │    │
+│  │    ┌────▼─────┐      │  Judge Worker × 2 (K=2)  │     │   │    │
+│  │    │   DAO    │      │  1. 取题 + 读用例(缓存)  │     │   │    │
+│  │    │ 互斥量    │      │  2. 生成 3 个 harness 文件│     │   │    │
+│  │    └────┬─────┘      │  3. g++-12 -c user.cpp    │     │   │    │
+│  │         │            │     g++-12 user.o tester  │     │   │    │
+│  │         │            │  4. 解析编译器输出 → CE? │     │   │    │
+│  │         │            │  5. 逐用例 fork+setrlimit │     │   │    │
+│  │         │            │  6. 单事务写回 DB         │     │   │    │
+│  │         │            └──────────┬───────────────┘     │   │    │
+│  │         │                       │                     │   │    │
+│  │  ┌──────▼────────┐   ┌──────────▼─────────────────┐  │   │    │
+│  │  │ 题库加载器     │   │ 工作区 /tmp/oj-judge/<id>/ │  │   │    │
+│  │  │ problems/*.json│   │  user.cpp / user.o        │  │   │    │
+│  │  │ 同步入库+缓存  │   │  *.h / tester.cpp / run   │  │   │    │
+│  │  └──────┬────────┘   └────────────────────────────┘  │   │    │
+│  └─────────┼────────────────────────────────────────────┘    │
+│            │ TCP 127.0.0.1:3306                                    │
+│  ┌─────────▼────────────────────────────────────────────┐        │
+│  │  mysqld (宿主机) 8.0.46                                 │        │
+│  │  /var/lib/mysql/<datadir>      ← 不用 initdb 脚本      │        │
+│  │  建表由应用启动时幂等执行（§8 R-8 的兜底在此成为主方案） │        │
+│  └────────────────────────────────────────────────────────┘        │
+│  ./logs/app.log   ./logs/judge.log    （按天切割，留 7 天）         │
+│  ./static/vendor/  ← 前端三库 vendored（D-73，无运行时外网依赖）  │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+> **路线 A 独有的三个细节**：
+>
+> 1. **建表不用 `/docker-entrypoint-initdb.d`**（那是容器机制）。改为应用启动时**幂等执行** `CREATE TABLE IF NOT EXISTS` —— §8 R-8 原本只是"兜底"，在此成为**主方案**。
+> 2. **不用 volume**。`logs/` 与 `static/` 直接是仓库内目录，`.gitignore` 忽略其内容而非目录本身。
+> 3. **MySQL 内存必须调低**。默认 `innodb_buffer_pool_size = 128MB` 在 1967MB 的机器上占比过大。启动脚本里设为 **`64MB`**（§9 T0.1），否则 2 worker × 2 子进程 × 128MB `RLIMIT_AS` 逼近上限时，会把 mysqld 变成 OOM killer 的首选目标。
+
+#### 2.1-B 路线 B：Docker Compose（目标形态）
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Docker Compose (单机)                                                 │
 │                                                                        │
 │  ┌──────────────────────── oj 容器 ────────────────────────────────┐  │
-│  │                                                                  │  │
 │  │  ┌──────────────┐        ┌───────────────────────────────────┐  │  │
 │  │  │ HTTP 线程池   │        │  Judge 调度器 (1 个调度线程)       │  │  │
 │  │  │ cpp-httplib  │        │   - 内存 FIFO 队列                  │  │  │
 │  │  │  (N=8)       │───────▶│   - 启动时恢复 pending 任务         │  │  │
-│  │  │  - 静态文件   │ 入队   │   - 全局并发闸门(8) / 用户闸门(2)  │  │  │
+│  │  │  - 静态文件   │ 入队   │   - 全局并发闸门(4) / 用户闸门(2)  │  │  │
 │  │  │  - REST API  │        └────────────┬──────────────────────┘  │  │
-│  │  │  - Session   │                     │ 分发                      │  │
-│  │  └──────┬───────┘                     ▼                          │  │
-│  │         │                  ┌──────────────────────────────────┐  │  │
-│  │    ┌────▼─────┐            │  Judge Worker × K (K=4)         │  │  │
-│  │    │   DAO    │            │   1. 取题 + 读用例（内存缓存）   │  │
-│  │    │ 互斥量    │            │   2. 生成 solution_decl.h       │  │  │
-│  │    └────┬─────┘            │      + tester_util.h            │  │  │
-│  │         │                  │      + tester.cpp                │  │  │
-│  │         │                  │   3. g++ -c user.cpp -o user.o  │  │  │
-│  │         │                  │      g++ user.o tester.cpp -o run│ │
-│  │         │                  │   4. 解析编译器输出 → CE?        │  │  │
-│  │         │                  │   5. 逐用例 fork+setrlimit 执行   │  │  │
-│  │         │                  │   6. 写回 DB(逐用例行) + 汇总列    │  │  │
-│  └─────────┼──────────────────┴──────────────┬───────────────────┘  │  │
-│            │                                 │                      │
-│    ┌───────▼────────┐              ┌─────────▼──────────────────┐  │
-│    │ 题库加载器      │              │ 工作区 /tmp/oj-judge/<id>/ │  │  │
-│    │ problems/*.json│              │  user.cpp / user.o          │  │  │
-│    │ 启动时 upsert  │              │  *.h / tester.cpp / run     │  │  │
-│    │ + 灌内存缓存   │              └────────────────────────────┘  │  │
-│    └───────┬────────┘                      完成后清理              │
-│  ──────────┼─────────────────────────────────────────────────────   │
+│  │  │  - Session   │                     ▼                          │  │
+│  │  └──────┬───────┘         ┌──────────────────────────────────┐  │  │
+│  │         │                 │  Judge Worker × 2 (K=2)          │  │  │
+│  │    ┌────▼─────┐           │   1. 取题 + 读用例（内存缓存）     │  │  │
+│  │    │   DAO    │           │   2. 生成 solution_decl.h        │  │  │
+│  │    │ 互斥量    │           │      + tester_util.h + tester.cpp│  │  │
+│  │    └────┬─────┘           │   3. g++-12 -c user.cpp -o user.o │  │  │
+│  │         │                 │      g++-12 user.o tester.cpp     │  │  │
+│  │         │                 │   4. 解析编译器输出 → CE?        │  │  │
+│  │         │                 │   5. 逐用例 fork+setrlimit 执行    │  │  │
+│  │         │                 │   6. 写回 DB(逐用例行) + 汇总列     │  │  │
+│  │  ┌──────▼────────┐        └────────────┬───────────────────┐  │  │
+│  │  │ 题库加载器     │        ┌────────────▼─────────────────┐  │  │
+│  │  │ problems/*.json│        │ 工作区 /tmp/oj-judge/<id>/    │  │  │
+│  │  │ 启动时 upsert  │        │  user.cpp / user.o            │  │  │
+│  │  │ + 灌内存缓存   │        │  *.h / tester.cpp / run       │  │  │
+│  │  └──────┬────────┘        └──────────────────────────────┘  │  │
+│  └─────────┼────────────────────────────────────────────────────   │
 │            │  mysql://oj:oj@mysql:3306/oj                             │
-│    ┌───────▼────────────────────────────────────────────────────┐    │
-│    │  mysql 容器  (8.0)   volume: oj-mysql-data                  │    │
-│    │  /docker-entrypoint-initdb.d/01-schema.sql   首次自动建表   │    │
-│    └────────────────────────────────────────────────────────────┘    │
+│  ┌─────────▼────────────────────────────────────────────────────┐    │
+│  │  mysql 容器  (8.0)   volume: oj-mysql-data                  │    │
+│  │  /docker-entrypoint-initdb.d/01-schema.sql   首次自动建表   │    │
+│  └────────────────────────────────────────────────────────────┘    │
 │  volume: oj-logs → /var/log/oj/{app,judge}.log                      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+> **两张图的差异全部在"外壳"**：应用内部（HTTP 池 / DAO / 调度器 / Worker / 题库加载器 / 工作区）在 A/B **逐项一致**。因此 §2.3 的线程模型、§5 的判题流水线、§6 的 API 契约**对两条路线同等适用，文档不分叉**。
+>
+> **路线 B 的额外前提**（当前机器不满足）：需把当前用户加入 `docker` 组（`sudo usermod -aG docker $USER`）**并注销重新登录**，否则 `docker` 会持续报 `permission denied on /var/run/docker.sock`。
 
 ### 2.2 关键架构决策与理由
 
@@ -203,12 +292,31 @@
 主线程        : 加载题库 → 启动 judge 调度器 → httplib listen() 阻塞
 HTTP 线程 × 8 : 处理请求；DB 访问经全局 std::mutex 串行化
 调度线程 × 1  : 从 DB 恢复 pending → 入队 → 循环 pop 任务 → 投递到空闲 worker
-Judge Worker × 4: 阻塞在条件变量上，被唤醒后独占执行一个提交的全流程
+Judge Worker × 2: 阻塞在条件变量上，被唤醒后独占执行一个提交的全流程  [D-74]
 ```
 
 **锁顺序**：`DB mutex` 是唯一全局锁，仅在 DAO 调用期间持有，**绝不在持有 DB 锁时等待 judge**。判题流程不碰 DB 锁（除最终写回），避免长事务阻塞 HTTP 请求。
 
-**为什么不加大 worker 数**：judge 会 fork 子进程，CPU 密集；4 个 worker × 最多 8 个孙进程在 2 核机器上已接近饱和。全局闸门 8 保证机器不会被自己的评测打满导致误判 TLE。
+**worker 数与并发闸门的关系** `[D-74]`：
+
+```
+闸门 = 2 × worker 数
+4 = 2 × 2  ✓
+
+闸门 = 2 × worker 的意义：保证「每个 worker 同时最多派生 2 个子进程」，
+且任一 worker 不会一次占用全部闸门额度而让其他 worker 饿死。
+若闸门 == worker 数，则并发度退化为 1（一次只判一题），吞吐减半。
+```
+
+**为什么不加大 worker 数**：三条约束同时生效，取最紧的那条：
+
+| 约束 | 上限 | 依据 |
+|---|---|---|
+| CPU 核数 | 2 核 / 4 worker = 0.5 核/题 | 低于 1 核时 wall-clock 放大倍数上升，逼近 §5.4.2 的兜底墙钟 |
+| 内存 | 1967MB 总 / (2 worker × 2 子进程 × 128MB `RLIMIT_AS`) | 加上 mysqld（§2.1-A 已把 buffer pool 降到 64MB）与 8 个 HTTP 线程后余量有限 |
+| 闸门与 worker 的比例 | 闸门 = 2 × worker | 上面那条关系式 |
+
+> v1.0 曾取 worker 4 × 闸门 8。**下调到 2 × 4 后，§5.4.2 的墙钟放大倍数从 8 倍降到 4 倍**（3s CPU → 12s 墙钟），兜底墙钟的余量**从 1.46 倍升到 2.9 倍 —— 变安全了**。也就是说这次下调没有连带削弱任何安全性，只是把吞吐换成了与机器匹配的量级。
 
 ---
 
@@ -811,9 +919,44 @@ for (;;) {
 
 **为什么这个判据是对的**：`RLIMIT_CPU` 覆盖了"CPU 用得多"这一类，**唯一漏掉的是"完全不消耗 CPU 的阻塞"**。停滞检测精确地只补这一类，**不与 CPU 限制重复也不与之冲突**。
 
-> **仍然保留兜底墙钟，但它不再是判阻塞的主力**。阈值取 `time_limit_ms × 10 + 5000`（默认 35s）—— 相对 8 倍放大上限（24s）留了 1.46 倍余量，**结构上不可能误杀 8 并发下的合法解法**。它只兜两种情况：进程完全僵死（连 `SIGKILL` 前都读不到 rusage）、以及系统时钟被异常修改。
+> **仍然保留兜底墙钟，但它不再是判阻塞的主力**。它只兜两种情况：进程完全僵死（连 `SIGKILL` 前都读不到 rusage）、以及系统时钟被异常修改。
+
+#### 5.4.2.1 兜底墙钟与并发闸门的**定量关系式** `[D-62] [D-74]`
+
+兜底墙钟必须满足一条不等式，否则它会退化成 §5.4.1 那个"系统性误杀"的元凶：
+
+```
+最大墙钟放大倍数 = 闸门 × (核心数 / 核心数) 的实际分母
+                 = 闸门 × time_limit / (核心数 × 每进程可得核数)
+                 简化为：放大倍数 = 闸门        （因为闸门 ≤ 核心数时进程各占一核，放大 = 1；
+                                                闸门 > 核心数时每进程分 core/闸门 核，放大 = 闸门）
+
+✅ 必须满足：  闸门 × time_limit_ms  <  time_limit_ms × 10 + 5000
+               即：  闸门 < 10 + 5000 / time_limit_ms
+```
+
+**代入当前参数验算**：
+
+| 闸门 | time_limit | 需要的墙钟 | 兜底阈值 | 余量 | 结论 |
+|---|---|---|---|---|---|
+| 4（v1.6 现值）`[D-74]` | 3000ms | 12.0s | 35.0s | **2.9×** | ✅ 安全 |
+| 8（v1.0 原值） | 3000ms | 24.0s | 35.0s | 1.46× | ✅ 安全（但余量偏紧） |
+| 10 | 3000ms | 30.0s | 35.0s | 1.17× | ⚠️ 临界 |
+| 12 | 3000ms | 36.0s | 35.0s | **0.97×** | ❌ **开始误杀** |
+| 20 | 1000ms | 20.0s | 15.0s | 0.75× | ❌ **误杀** |
+
+> **结论一**：v1.6 把闸门从 8 降到 4，**兜底墙钟的余量从 1.46 倍升到 2.9 倍** —— 这次资源下调**没有连带削弱安全性**，反而更宽松。§1.4 的资源下调声明里"不需要下调系数"的结论，其依据就是这张表。
 >
-> **若将来提高全局并发闸门（>10）**，这个 `× 10` 必须同步上调，否则兜底墙钟会变成新的误杀源。这是与 §6.3.6 的 `queueAhead` 依赖 FIFO 假设**同类的隐含契约**，需要写进代码注释。
+> **结论二**：**`× 10` 这个系数不是随手取的**，它的上界由"闸门 < 10"决定。若将来因换大机器而提高闸门（>10），**必须同步提高 `× 10`**，否则兜底墙钟会从"安全网"退化成"误杀器" —— 那就等于把 §5.4.1 修掉的 bug 又请回来。
+>
+> ⚠️ **这与 §6.3.6 的 `queueAhead` 依赖 FIFO 是同类的隐含契约**，两处都必须在代码里留注释：
+> ```cpp
+> // 【隐含契约 1】本阈值与「全局并发闸门」绑定。
+> //   约束： 闸门 × time_limit_ms < 兜底阈值
+> //   现状：  4 × 3000 = 12000 < 35000  ✓（余量 2.9 倍）
+> //   改闸门前必须重算，改此系数前必须重算。
+> // 【隐含契约 2】queueAhead 的 `id < ?` 依赖队列 FIFO，见 §6.3.6。
+> ```
 
 #### 5.4.3 进程组隔离与工作目录
 
@@ -1092,11 +1235,14 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 ```
 /home/ZL/project/cpp-oj-vibcoding/
 ├── SPEC.md
-├── docker-compose.yml
-├── .env                        # OJ_ALLOW_REGISTER / OJ_ADMIN_USERNAMES（D-37 角色的唯一真源）
-├── Dockerfile
+├── Makefile                   # 路线 A 的构建与启动入口（D-71）
+├── .env                       # OJ_ALLOW_REGISTER / OJ_ADMIN_USERNAMES（D-37 角色的唯一真源）
+├── .gitignore
+├── docker-compose.yml         # 【路线 B 可选】D-71
+├── Dockerfile                 # 【路线 B 可选】D-71
 ├── db/
-│   └── init/01-schema.sql            # 挂载到 /docker-entrypoint-initdb.d
+│   └── init/01-schema.sql            # 路线 B 挂载到 /docker-entrypoint-initdb.d；
+│                                    # 路线 A 由应用启动时幂等执行同一份 SQL
 ├── problems/                         # 题库 JSON（唯一真源）
 │   ├── two-sum.json
 │   └── ...
@@ -1107,10 +1253,13 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 │   ├── problem/        loader.h  json_schema.h
 │   ├── judge/          queue.h  scheduler.h  worker.h
 │   │                  generator.h   # tester.cpp 代码生成器
-│   │                  runner.h       # fork + setrlimit 执行
-│   │                  compiler.h     # g++ 调用 + 输出解析
+│   │                  runner.h       # fork + setrlimit + CPU 停滞检测
+│   │                  compiler.h     # g++ 调用 + 输出解析 + 归属分流
 │   └── web/            routes.h  session.h  ratelimit.h  admin.h  # admin.h = require_admin 守卫 + overview
 ├── src/                （对应 .cpp）
+├── third_party/              # 【可选】自部署头文件（仅当 §6.7.2 的 apt 版本不满足时）
+│   ├── httplib/httplib.h
+│   └── nlohmann/json.hpp
 ├── static/
 │   ├── login.html  list.html  problem.html  history.html
 │   ├── admin.html                       # 仅 admin，只读（D-37）
@@ -1119,7 +1268,17 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 │           editor.js  markdown.js  poll.js  common.js  admin.js
 │           overview.js                  # v1.3：概览条 + 掌握分布的共享渲染与缓存（D-38/D-39）
 │           diff.js                      # v1.4：LCS 行级 diff，纯计算无网络（D-42/D-50）
-├── logs/               # volume 挂载点
+│   └── vendor/                        # 【前端三库 vendored，D-73】—— 完整清单见 §6.7.3
+│       ├── cm/
+│       │   ├── codemirror.min.js           # 核心（不含任何语言模式）
+│       │   ├── mode/clike/clike.min.js     # C++ 高亮（注册 text/x-c++src）
+│       │   ├── addon/edit/matchbrackets.min.js
+│       │   ├── addon/edit/closebrackets.min.js
+│       │   └── addon/comment/comment.min.js
+│       ├── marked.min.js
+│       ├── purify.min.js
+│       └── LICENSES/                 # 三个库的 MIT LICENSE，vendored 进产物必须附带
+├── logs/               # 路线 A：仓库内目录；路线 B：volume 挂载点（D-71）
 └── tests/
     ├── run_tests.sh                 # 端到端验收脚本
     └── problems/                    # 验收用特制题目
@@ -1128,19 +1287,66 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 > **`overview.js` 为什么单列一个文件** `[D-38] [D-39]`：概览条（`list.html`）与掌握分布 tab（`history.html` tab2）消费的是**同一个端点的同一份数据**，AC-24 要求两者数值必然一致。把请求 + 聚合口径 + 渲染都收在这一个模块里，一致性就由"只有一份实现"保证，而不是靠约定。模块内含一个页面生命周期级的缓存，避免切 tab 或翻页时重复请求。
 > `overview.js` 不引入任何框架，与其余 `js/` 模块同为原生 ES Module，由 `<script type="module">` 引入。
 > **`diff.js` 同样是纯计算模块** `[D-42]`：只做「两段代码 → hunks」，不发请求、不碰 DOM。这样 AC-28 的性能要求（§1.4 的 P95 < 100ms）可被独立测量，也让它能脱离页面单独测。
+>
+> **`<script>` 的加载顺序有依赖** `[D-73]`：CodeMirror 的 5 个文件必须按 `codemirror.min.js` → `mode/clike` → `addon/*` 顺序加载（addon 依赖核心已注册），且全部加 `defer`。这五个文件缺一的后果各不相同 —— **最坑的是 addon：缺失时配置项静默失效不报错**（§6.7.3 有对照表）。
 
-### 6.2 第三方依赖（全部需在 Dockerfile 中安装）
+### 6.2 第三方依赖
 
-| 库 | 用途 | 说明 |
+**服务端**（apt 包名、noble 实际版本、头文件路径的完整清单见 **§6.7.2**）：
+
+| 库 | apt 包 | 版本 | 用途 | 说明 |
+|---|---|---|---|---|
+| cpp-httplib | `libcpp-httplib-dev` | **0.14.3** `[D-72]` | HTTP 服务 | header-only，落在 `/usr/include/httplib.h`。`CPPHTTPLIB_OPENSSL_SUPPORT` 关闭（单机 HTTP） |
+| MySQL C Connector | `default-libmysqlclient-dev` | 8.0.46 | 数据库 | `/usr/include/mysql/mysql.h` |
+| nlohmann/json | `nlohmann-json3-dev` | 3.11.3 | JSON 解析 | header-only，`/usr/include/nlohmann/json.hpp` |
+| **OpenSSL libcrypto** | `libssl-dev` | 3.0.13 | 密码哈希（Blowfish）`[D-75]` | **替代 `libbcrypt`** —— 24.04 官方源无 `libbcrypt-dev`；`/usr/include/openssl/blowfish.h` 已就位 |
+| ~~bcrypt (`libbcrypt`)~~ | ❌ | — | — | **24.04 官方源不存在此包**，`apt-cache search bcrypt` 无结果。见 §6.2.1 |
+| cpp-httplib OpenSSL | `libssl-dev` | 3.0.13 | HTTPS | **首版关闭**（§6.2 尾注），nginx 反代时再启用 |
+
+> **cpp-httplib 0.14.3 vs 0.15.3** `[D-72]`：apt 提供 0.14.3，低于本 SPEC 早期引用的 0.15.3。选 apt 版是为了**消除"宿主编过、容器编不过"的版本漂移**（§6.7.2）。若实现时用到 0.15 独有 API，改用 `third_party/httplib/httplib.h` 自部署 —— **两种部署方式的 include 写法都是 `#include <httplib.h>`，源码零差异**。
+
+**前端**（全部 **vendored** 到 `static/vendor/` `[D-73]`，**不在运行时引 CDN**；文件清单与下载命令见 §6.7.3 与附录 A）：
+
+| 库 | 版本 | 用途 | 文件数 |
+|---|---|---|---|
+| CodeMirror 5 | 5.65.16 | 代码编辑器 | **5 个**（核心 + clike 模式 + 3 个 addon），见下方说明 |
+| Marked | 12.0.2 | 题面 Markdown 渲染 | 1 |
+| DOMPurify | 3.1.6 | XSS 过滤（配合 marked） | 1 |
+
+> ⚠️ **CodeMirror 5 不是单文件**。实测 `codemirror.min.js` 中 `clike` 出现次数为 **0** —— 它只是核心与 JS 基础语法。而 §7.3 的编辑器配置要求 `matchBrackets: true`、C++ 高亮、`Ctrl+/` 注释，**这些全部依赖单独加载的 mode / addon 文件，且缺失时静默失效不报错**。对照表见 §6.7.3。
+>
+> **为什么 vendored 而非 CDN** `[D-73]`：① R-7 的"CDN 不可达"风险**从源头消除**，降级到 textarea 的路径随之降为防御性冗余、不强制实现；② §1.1 的"离线"定位在演示场景下（断网）只有 vendored 能挡；③ 代价是镜像多约 260KB 与附带 3 份 MIT LICENSE，量级可忽略。
+
+### 6.2.1 密码哈希：为什么是 OpenSSL Blowfish 而非 libbcrypt `[D-75]`
+
+§6.2 早期写的是「bcrypt (`libbcrypt`) 或用 OpenSSL `EVP` 自行实现 Blowfish」。在 Ubuntu 24.04 上做了实测，**备选变成了唯一选项**：
+
+```bash
+$ apt-cache search bcrypt
+libcrypt-dev            # glibc 的 crypt()，不是 bcrypt
+libcrypt-openssl-*      # Perl 模块
+...                     # 无任何 libbcrypt 包
+
+$ apt-cache policy libbcrypt-dev
+（无 Candidate）
+```
+
+| 方案 | 24.04 可用性 | 结论 |
 |---|---|---|
-| cpp-httplib (header-only) | HTTP 服务 | `CPPHTTPLIB_OPENSSL_SUPPORT` 关闭，单机 HTTP |
-| MySQL C Connector | 数据库 | 官方 `libmysqlclient-dev` |
-| nlohmann/json | JSON 解析 | header-only |
-| bcrypt (`libbcrypt`) | 密码哈希 | 或用 OpenSSL `EVP` 自行实现 Blowfish |
-| cpp-httplib OpenSSL | HTTPS | **首版关闭**，nginx 反代时再启用 |
-| marked.js (CDN) | Markdown 渲染 | 前端 |
-| DOMPurify (CDN) | XSS 过滤 | 前端，配合 marked |
-| CodeMirror 5 (CDN) | 代码编辑器 | 前端 |
+| `libbcrypt-dev` | ❌ 官方源无此包 | 只能从源码编译 bcrypt（引入 vendored C 源码 + 自维护） |
+| **OpenSSL `libcrypto` 的 Blowfish** | ✅ `/usr/include/openssl/blowfish.h` 已就位 | **采用** |
+| glibc `crypt()` | ⚠️ 可用但**不保证算法是 bcrypt** | 不可控，不采用 |
+
+**实现要点（4 条）**：
+
+1. **自己实现 bcrypt 的 cost 调度**。OpenSSL 只提供 Blowfish 底层原语，**没有 bcrypt 的 EksBlowfishSetup / 盐值编码 / base64 变体**。这部分约 200~300 行，需要仔细对照 RFC 6234/Provos 的测试向量。
+2. **必须实现自带的测试向量校验**。这一点不可省 —— 上述实现最容易出的错是 base64 变体的字母表顺序（bcrypt 用的是 `./A-Za-z0-9` 顺序，**不是标准 base64**），错了会导致"自己算的 hash 与预期不符"且极难察觉。
+3. **cost=10**（`users.password_hash` 的注释保持不变）。1967MB 机器上单次 bcrypt 约 60~100ms，与 §6.3.5 的改密接口在全局 `DB mutex` 内的耗时可接受（< 200ms，远小于 §5.8 的单用户提交限制）。
+4. **`password_hash` 列宽 255 够用**。bcrypt 的标准输出是 60 字符（`$2b$10$` + 22 盐 + 31 哈希），255 有充足余量，无需改 DDL。
+
+> **为什么不为省 200 行代码而降低算法强度**：不能退回 MD5/SHA-256（§8 曾列为不可接受）。自实现 bcrypt 是一次性成本，而密码哈希是全系统唯一不可逆的信任根。
+>
+> **验收锚点**：AC-1（注册登录）之外，新增 **AC-49** 用 RFC 6234 官方测试向量验证自实现与参考实现逐字节一致。
 
 ### 6.3 API 契约
 
@@ -1659,6 +1865,132 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 
 ---
 
+### 6.7 开发环境依赖（Ubuntu 24.04 / 路线 A） `[D-71] [D-72] [D-73] [D-75]`
+
+本节是**在真实机器上核对过**的依赖清单，不是从文档推演的。核对日期与结论直接驱动了 §6.2 的库选型、§1.4 的资源下调、§8 R-7 的降级。
+
+#### 6.7.1 实测环境现状
+
+| 项 | SPEC 目标 | 实测 | 结论 |
+|---|---|---|---|
+| 系统 | Ubuntu 24.04 | 24.04.4 LTS (noble)，内核 6.8.0 | ✅ |
+| CPU | 2 核 | **2 核** | ✅ 刚好够 `worker 2 × 闸门 4` |
+| 内存 | 4G | **1967MB**（可用 426MB） | ⚠️ 触发 §1.4 的双档与 `D-73` 下调 |
+| 磁盘 | — | 50G 中 31G 可用（`/tmp` 为 judge 工作区） | ✅ |
+| 编译器 | g++ 12 / C++17 | 宿主默认 **g++ 13.3.0** | 需装 `g++-12` 显式对齐（D-13） |
+| 权限 | 装包需 root | **uid=1002，无免密 sudo** | 装包需交互输入密码 |
+| Docker | 双容器（路线 B） | 已装 29.6.1，但**用户不在 `docker` 组** | `permission denied on /var/run/docker.sock` → 走路线 A |
+| MySQL 服务端 | — | `mysqld` **已存在** 8.0.46 | 路线 A 可直接初始化，无需容器 |
+| 构建工具 | — | `make` 4.3 ✅ / `cmake` ❌ / `pkg-config` ❌ | 需补装后两者 |
+| 前端工具链 | — | node 24.21 / npm 11.19 / python3 3.12 ✅ | 装包用 `apt`，**不需要 node** |
+
+**网络可达性实测**（决定下载源）：
+
+| 目标 | 可达 | 影响 |
+|---|---|---|
+| `cdn.jsdelivr.net/npm/...` | ✅ 200 | **前端库唯一可用的下载路径** |
+| `cdn.jsdelivr.net/gh/...` | ⚠️ **部分 404** | 同站不同路径可达性不同，**不要用 `/gh/`** |
+| `github.com` / `raw.githubusercontent.com` | ❌ 不可达 | 不能从 GitHub 直下任何东西 |
+| `gitee.com` | ✅ 200 | git remote 走 SSH（已配置并验证） |
+| `mirrors.tencentyun.com` | ✅ 200 | apt 主源 |
+| `archive.ubuntu.com` | ✅ | apt 备源 |
+
+#### 6.7.2 服务端包依赖（apt，noble 实测版本）
+
+| 用途 | 包 | 版本 | 头文件路径 | 必需 |
+|---|---|---|---|---|
+| C++ 编译器 | `g++-12` `gcc-12` | 12.4.0 | — | ✅ |
+| 构建 | `make` | 4.3 | — | ✅ |
+| 构建 | `cmake` | 3.28.3 | — | 可选 |
+| 构建 | `pkg-config` | 1.8.1 | — | 建议 |
+| JSON | `nlohmann-json3-dev` | 3.11.3 | `/usr/include/nlohmann/json.hpp` | ✅ |
+| HTTP | `libcpp-httplib-dev` | **0.14.3** | `/usr/include/httplib.h` | ✅ |
+| DB 客户端 | `default-libmysqlclient-dev` | 8.0.46 | `/usr/include/mysql/mysql.h` | ✅ |
+| 密码哈希 | `libssl-dev` | 3.0.13 | `/usr/include/openssl/{evp,blowfish}.h` | ✅ |
+| DB 服务端 | `mysql-server` | 8.0.46 | — | 路线 A |
+| ~~bcrypt~~ | ❌ | — | — | 见 §6.2.1 |
+
+> **`libcpp-httplib-dev` 的文件布局**（实测 Ubuntu 包清单）：只含一个文件 **`/usr/include/httplib.h`**，**不是** `/usr/include/cpp-httplib/httplib.h`。因此：
+>
+> ```cpp
+> #include <httplib.h>            // ✅ apt 装：/usr/include/httplib.h
+> #include <httplib.h>            // ✅ 自部署：-Ithird_party/httplib
+> ```
+>
+> **两种部署方式同一行 include 均可，源码零差异，无需条件编译。** `[D-72]`
+
+#### 6.7.3 前端库文件清单（vendored） `[D-73]`
+
+**CodeMirror 5 不是单文件**。实测 `codemirror.min.js` 中 `clike` 出现 **0 次** —— 它只含核心与 JS 基础语法。§7.3 的编辑器要求（C++ 高亮、`matchBrackets`、`Ctrl+/`）**必须靠额外加载 mode / addon**，且：
+
+| 文件 | 作用 | 缺失后果 | 大小 |
+|---|---|---|---|
+| `cm/codemirror.min.js` | 核心 | 编辑器完全不出现 | 174 KB |
+| `cm/mode/clike/clike.min.js` | C++ 高亮（注册 `text/x-c++src`） | 无语法高亮 | 21 KB |
+| `cm/addon/edit/matchbrackets.min.js` | `matchBrackets: true` | ⚠️ **静默失效，不报错** | 3.5 KB |
+| `cm/addon/edit/closebrackets.min.js` | 自动补全 `{}` | 无自动补全 | 3.9 KB |
+| `cm/addon/comment/comment.min.js` | `Ctrl+/` 注释 | 快捷键无效 | 2 KB |
+| `marked.min.js` | 题面 Markdown | 题面显示原始源码 | 35 KB |
+| `purify.min.js` | XSS 过滤 | ⚠️ **安全缺口** | 21 KB |
+
+合计约 **260 KB**，另附 3 份 MIT LICENSE（vendored 进产物必须保留原始许可声明）。
+
+> **`matchbrackets` 那行是本清单存在的主要理由**：只加载 `codemirror.min.js` 时，`matchBrackets: true` **不报错也不生效**。CodeMirror 5 的 addon 是"配置项存在但无对应实现"，这种静默失败排查成本极高。**把 5 个文件列成依赖表，而不是写一句"CodeMirror 5"，是对文档精度要求的兑现。**
+
+#### 6.7.4 下载命令
+
+> ⚠️ **必须用 `/npm/` 路径。** 实测 `/gh/` 对 `lib/codemirror.min.js` 与 `marked.min.js` 均返回 404，而 `/npm/` 全部 200。
+
+```bash
+# ===== 前端三库 vendored [D-73] =====
+V=5.65.16
+B=https://cdn.jsdelivr.net/npm
+mkdir -p static/vendor/cm/{mode/clike,addon/edit,addon/comment} \
+         static/vendor/LICENSES
+
+curl -sSL -o static/vendor/cm/codemirror.min.js                 $B/codemirror@$V/lib/codemirror.min.js
+curl -sSL -o static/vendor/cm/mode/clike/clike.min.js          $B/codemirror@$V/mode/clike/clike.min.js
+curl -sSL -o static/vendor/cm/addon/edit/matchbrackets.min.js  $B/codemirror@$V/addon/edit/matchbrackets.min.js
+curl -sSL -o static/vendor/cm/addon/edit/closebrackets.min.js  $B/codemirror@$V/addon/edit/closebrackets.min.js
+curl -sSL -o static/vendor/cm/addon/comment/comment.min.js      $B/codemirror@$V/addon/comment/comment.min.js
+curl -sSL -o static/vendor/marked.min.js                        $B/marked@12.0.2/marked.min.js
+curl -sSL -o static/vendor/purify.min.js                        $B/DOMPurify@3.1.6/dist/purify.min.js
+
+# 完整性自检：7 个文件，每个都应 > 1KB（404 响应体只有 50~90 字节）
+find static/vendor -name '*.js' -size -1k -print   # 应无输出
+
+# ===== 自部署头文件（仅当需要 cpp-httplib 0.15.x 时）[D-72] =====
+# mkdir -p third_party/httplib third_party/nlohmann
+# curl -sSL -o third_party/httplib/httplib.h \
+#   $B/../gh/yhirose/cpp-httplib@v0.15.3/httplib.h   # ⚠️ /gh/ 对此仓库可用性需实测
+```
+
+#### 6.7.5 一键安装（路线 A）
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  g++-12 gcc-12 make cmake pkg-config \
+  nlohmann-json3-dev libcpp-httplib-dev \
+  default-libmysqlclient-dev libssl-dev \
+  mysql-server
+
+# 初始化并启动 MySQL（无 systemd 的环境下用 mysqld_safe）
+sudo mysqld --initialize-insecure --user=mysql
+sudo mysqld_safe &
+# 1967MB 机器必须调低 buffer pool，否则会与 judge 抢内存 [D-74]
+# 见 §9 T0.1 的启动脚本
+```
+
+#### 6.7.6 路线 B 的额外前提（当前机器不满足）
+
+```bash
+sudo usermod -aG docker $USER    # ⚠️ 必须【注销并重新登录】才生效
+sudo dockerd &                   # 无 systemd 时手动拉起
+```
+
+生效后 `docker info` 应能连通；未生效时会持续报 `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock`（这是本次实测到的原始报错）。
+---
+
 ## 7. 前端设计
 
 ### 7.1 页面结构 `[D-32] [D-36] [D-37] [D-38] [D-39] [D-52]`
@@ -1895,7 +2227,7 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 | **R-4** | **judge 资源泄漏**（僵尸进程/残留目录/磁盘） | 长期运行后机器劣化 | 中 | ① `prctl(PR_SET_PDEATHSIG, SIGKILL)` 绑定 worker；② `waitpid` 必调；③ 工作目录 finally 块清理；④ 启动时扫描清理 `/tmp/oj-judge/*`；⑤ 预留启动时的 `/tmp` 空间检查 |
 | **R-5** | **题库录入量不足**（50 道题工时超预期） | 演示效果差 | 中 | 里程碑 M3 先录 20 道覆盖高频题型（数组/双指针/链表/树/动态规划/二分），M5 视进度补到 50 |
 | **R-6** | **并发下 DB 锁竞争** | 列表页变慢 | 低 | 全局互斥量已串行化；必要时对 `problems` 表加查询缓存（TTL 60s，题库启动时同步后基本不变） |
-| **R-7** | **CDN 依赖不可达**（CodeMirror/marked 加载失败） | 编辑器不可用 | 中 | 启动时检测；`editor.js` 内置 `<textarea>` 降级路径，保证核心链路（写码→提交→看结果）不被阻断 |
+| **R-7** **已消除** | ~~CDN 依赖不可达（CodeMirror/marked 加载失败）~~ | ~~编辑器不可用~~ | ~~中~~ | **v1.6 已消除** `[D-73]`：三库 vendored 到 `static/vendor/`，**运行时不再有外网依赖**。`editor.js` 的 textarea 降级路径因此降为**防御性冗余，不强制实现**（保留是因为它仍能兜住"文件被误删"） |
 | **R-8** | **MySQL 首次初始化失败**（initdb 脚本仅首次执行） | 容器起来但无表 | 中 | 服务启动时检测表是否存在，不存在则**幂等执行** schema（`CREATE TABLE IF NOT EXISTS`）作为兜底 |
 | **R-9** | **严格资源限制误杀**（LeetCode 同级限制在本机偏紧） | 用户频繁 TLE | 中 | 题目 JSON 逐题可配 `time_limit_ms`/`mem_limit_kb`，默认取 LeetCode 同级值，录入时按需放宽 |
 | **R-10** | **v1.4 新增 6 个端点 + 1 列 DDL 落在原定 M3/M4 窗口内**，挤占题库录入时间 | 进度落后 | **中高** | 见 §8.1 的 v1.4 专项降级 |
@@ -1908,6 +2240,7 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 | **R-17** **已修复** | ~~平台生成文件的编译错误无法归属~~ | — | — | **v1.5 已修**：`D-64` 归属分流 + §4.2.1 生成期校验，见 §5.6 |
 | **R-18** **已修复** | ~~CE 的 `case_total=0`~~ | — | — | **v1.5 已修**：`D-65` 改 `GREATEST` 口径，见 §5.6.3 |
 | **R-19** **已修复** | ~~RE 与 JE 无法区分~~ | — | — | **v1.5 已修**：`D-66` 0 条 `@@OJ@@` → JE，见 §5.6.2 |
+| **R-20** | **自实现 bcrypt 写错**（base64 变体字母表顺序是最易错点） | 密码校验全线失败或全被绕过 | 中 | ① 实现前先跑 RFC 6234 官方测试向量（AC-49）；② 一次注册后**立刻**验证登录，不把"注册成功"当成"哈希正确" |
 
 #### 8.1.1 v1.5 审计的四个硬漏洞（已全部修复）
 
@@ -1979,14 +2312,27 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 ### M0 — 地基（Day 1–2）
 
-- [ ] T0.1 目录骨架 + `docker-compose.yml`（mysql + oj 双容器，volumes，healthcheck）
-- [ ] T0.2 `Dockerfile`：基于 `ubuntu:22.04`，装 `g++-12`、MySQL Connector、cmake、bash
+- [ ] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **附录 A** 的一键脚本 + §6.7.4 的下载命令
+  - 确认 `dpkg -L libcpp-httplib-dev | grep httplib.h` 返回 `/usr/include/httplib.h`（§6.7.2）
+  - 确认 `static/vendor` 下 7 个 js 文件**全部 > 1KB**（`find static/vendor -name '*.js' -size -1k` 应无输出）
+  - 初始化并启动本机 `mysqld`，**把 `innodb_buffer_pool_size` 设为 64MB**（1967MB 机器上不调会与 judge 抢内存，见 §2.1-A 第 3 条）
+- [ ] T0.1 目录骨架 + **`Makefile`（路线 A 主入口）** `[D-71]`
+  - `make build` / `make run` / `make test` / `make clean`
+  - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `./oj`
+  - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
+- [ ] T0.2 【路线 B 可选】`Dockerfile` + `docker-compose.yml`：`ubuntu:22.04` 装 `g++-12`、MySQL Connector、cmake
+  - **不在关键路径上** —— 若 T0.1 的 Makefile 路线跑通，本任务可延后到 M5 或直接砍掉
 - [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，**仍 11 张表**，注意外键依赖顺序：`problems`/`users`/`tags` 须先建；含 v1.4 新增的 `problems.hint_md`）
+  - 路线 A：应用启动时**幂等执行**这份 SQL（§2.1-A 第 1 条），不用 initdb 机制
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
-- [ ] **验收**：`docker compose up` 后浏览器访问 `localhost:8080` 看到页面；`/var/log/oj/app.log` 正常输出
+- [ ] T0.6 **vendored 前端库接入** `[D-73]`
+  - 5 个 CodeMirror 文件按 **`defer` + 依赖顺序**引入（见 §6.1 末尾的加载顺序说明）
+  - 页面内断言 `typeof CodeMirror !== 'undefined' && CodeMirror.modes.clike` —— **C++ 模式没加载时要立刻报错**，不能等到用户发现没高亮
+  - 三个 MIT LICENSE 放进 `static/vendor/LICENSES/`
+- [ ] **验收**：`make run` 后浏览器访问 `localhost:8080` 看到页面；`./logs/app.log` 正常输出；**编辑器有 C++ 高亮**（目视 + 上面那条断言）
 
 ### M1 — 题库与生成器（Day 3–6）★ 最高风险
 
@@ -2038,7 +2384,9 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 - [ ] T3.1 `db/mysql_pool.h` + 互斥量串行化；所有 DAO 用预处理语句（**禁止字符串拼接 SQL**）
 - [ ] T3.2 DAO：`user` `problem` `problem_case` `problem_param` `tag` `submission` `submission_case_result` `submission_compile_error` 八组
-- [ ] T3.3 认证：bcrypt 注册/校验 + 64 hex token 会话 + HttpOnly Cookie
+- [ ] T3.3 认证：自实现 bcrypt（`libssl-dev` Blowfish，`D-74`）注册/校验 + 64 hex token 会话 + HttpOnly Cookie
+  - **先写测试向量校验**（RFC 6234 / Provos 的 `$2a$` / `$2b$` 用例），**逐字节比对**参考输出；base64 变体字母表是 `./A-Za-z0-9` 顺序而非标准 base64，是最易错点（§6.2.1）
+  - cost=10；`password_hash` 列宽 255 足够，**不改 DDL**
   - `register` / `login` / `me` 三个响应体追加 `role` 字段
   - `register` 入口先查 `OJ_ALLOW_REGISTER`，为 0 时返回 1010 且不落库
   - `register` **不做提权** —— 新用户恒为 `user`，角色只由 T3.9 的启动同步决定
@@ -2304,7 +2652,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 | AC-35 | 顶栏两套形态 `[D-52]` | 未登录：只有「登录/注册」；普通用户：有「我的/登出」无「运维/角色徽标」；admin：全部有且有 `管理员` 徽标；`login.html` 页面**不存在顶栏元素**；三种形态在题目页均能用 compact 变体渲染 |
 | AC-36 | diff/删除的归属不放宽 `[D-42] [D-49]` | AC-20 立场延续：用户 A 请求 B 的提交做 diff → 1003；A 删除 B 的提交 → 1003。**包括 A 是 admin 的情况** |
 | AC-37 | 历史分页与排序 `[D-61]` | 默认按 `created_at` 倒序、每页 20 条；翻页后顺序稳定不重不漏；筛选（题目/结论）与分页可组合 |
-| AC-38 | **并发下不误判 TLE** `[D-62]` | 造一个 CPU 耗时约 2.5s 的用例（远低于 3s 限制），在**全局 8 并发**下连续跑 10 轮 → **100% 得到 verdict（AC 或 WA），0 次 TLE**。这是 v1.4 墙钟保险阀必然失败的场景（§5.4.1），也是 R-14 停滞检测误判的检验 |
+| AC-38 | **并发下不误判 TLE** `[D-62] [D-74]` | 造一个 CPU 耗时约 2.5s 的用例（远低于 3s 限制），在**全局 4 并发**下连续跑 10 轮 → **100% 得到 verdict（AC 或 WA），0 次 TLE**。这是 v1.4 墙钟保险阀必然失败的场景（§5.4.1），也是 R-14 停滞检测误判的检验。⚠️ **必须在 4G 机器上执行**（§1.4 双档），本机 1967MB 跑出的延迟数字不可信 |
 | AC-39 | **阻塞能被抓住且不误判** `[D-62]` | ① `sleep(999)` → 1.5s 内判 TLE（停滞检测生效，不是等 35s 兜底）；② `while(true){}` → 由 `RLIMIT_CPU` 在约 4s 判 TLE；③ 正常 3ms 用例**不被停滞检测误杀**（连续 50 轮全 AC） |
 | AC-40 | **0 条 `@@OJ@@` → JE** `[D-66]` | 用一份 `__expr` 语法错误的题库（生成出无法编译的 `tester.cpp` 但**不触发**生成期校验的场景，如 `harness_prelude` 里引用的函数未定义）→ 用户提交 → `verdict='JE'`，**不是 RE**；UI 显示「平台错误」+ 重试按钮，**不显示"运行错误"** |
 | AC-41 | **CE 的用例数语义** `[D-65]` | 造一份语法错误的代码提交到有 12 个用例的题 → `case_total=12`（不是 0）、`case_passed=0`、`caseResults` 为空数组；UI 状态行显示「❌ 编译错误 · 12 个用例未执行」且**不渲染逐用例表**；`tests/run_tests.sh` 的派生列断言对这条记录**通过** |
@@ -2314,6 +2662,8 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 | AC-45 | **`failed` 的不变量与断言** `[D-67]` | 断言 SQL（§3.4 v1.5 版）对**所有** `status IN ('done','failed')` 的记录返回 0；用 `information_schema` 确认断言确实 JOIN 了 `problems`；手工构造一条 `failed` 且带 1 条明细行的脏数据 → 断言**必须报 1**（证明它真的在校验） |
 | AC-46 | **主标签确定性** `[D-68]` | 造一道挂 3 个 algorithm 标签、通过率分别 8/10、3/10、5/10 的题 → 推荐理由指向**通过率 3/10 的那个标签**；把三者的通过率改成全相等 → 结果**可复现**（连跑 5 次同一输入得同一题）；无 algorithm 标签的题不出现在推荐候选里 |
 | AC-47 | **题库加载期校验** `[D-64]` | 放 3 个 JSON：1 个正常、1 个 `expected` 容器深度不符、1 个 `args` 数量与 `params` 不符 → 服务**正常启动**，两个坏题被跳过并 `ERROR` 点名，好题正常可用；列表页**不出现**被跳过的题 |
+| AC-48 | **vendored 前端库完整性** `[D-73]` | ① 断网状态下打开题目页：编辑器**有 C++ 语法高亮**、题面 Markdown 正常渲染、`<script>` 被 DOMPurify 清除（三项都不依赖外网）；② `static/vendor` 下 7 个 js 文件全部存在且 > 1KB；③ 3 份 MIT LICENSE 在 `static/vendor/LICENSES/` 内；④ **`Network` 面板中无任何指向 `cdn.jsdelivr.net` 等外部域的请求** |
+| AC-49 | **自实现 bcrypt 正确性** `[D-75]` | 用 RFC 6234 / Provos 官方测试向量（含 `$2a$` 与 `$2b$`、不同 cost、空口令、70+ 字节口令、含 NUL 字节）验证：自实现输出与参考实现**逐字节一致**；再验证「注册 → 退出 → 重新登录」闭环通过。**不得**用"注册没报错"当作哈希正确的证据 |
 
 ### 10.2 非功能验收
 
@@ -2387,3 +2737,121 @@ V-3  验证 §5.3（stdout/stderr 分流是否可靠）
 > 1. **§5 判题流水线逐字未改** —— D-42~D-61 全部是"提交记录怎么读/怎么操作"，判题侧零改动。
 > 2. **§2 架构与线程模型未改** —— 没有新组件、没有新线程、没有新的中间件。
 > 3. **§3.4 的受控反范式立场未改** —— `queueAhead` 与推荐都刻意**不落派生列**，与 §3.5 同一逻辑。
+
+**v1.6 的联动面** `[D-71~D-75]`：环境落地轮。**DDL 零变更**（11 张表、0 列），**API 契约与 20 条错误码零新增**。改动集中在 **§0（+5 决策）/ §1.4（并发 8→4、内存双档）/ §2.1（拆 A/B 两图）/ §2.3（worker 4→2 + 闸门比例关系式）/ §5.4.2.1（新增兜底墙钟定量关系式）/ §6.1（+third_party、+static/vendor、+.gitignore、+Makefile）/ §6.2（httplib 版本与 CodeMirror 拆 5 文件）/ §6.2.1（新增 bcrypt 替代方案）/ §6.7（新增完整环境清单）/ §8（+R-20、R-7 标为已消除）/ §9（新增 T0.0、改写 T0.1/T0.2/T0.3/T3.3/新增 T0.6、AC 口径）/ §10.1（AC-38 改 4 并发、+AC-48/AC-49）/ 附录 A（新增）**。
+
+> **v1.6 特意没动的四处**，因为环境问题**不该回头改架构**：
+> 1. **§3.2 DDL 逐字未改** —— 换构建方式、换 bcrypt 实现、换前端加载方式，都不改变持久化形态。`password_hash` 仍 255 宽、仍存 60 字符的 bcrypt 输出。
+> 2. **§5 判题流水线未改** —— 判题逻辑与"跑在容器里还是宿主机上"完全无关；§2.1-A/B 两图的内部结构逐项一致。
+> 3. **§6.3 API 契约未改** —— 前端改成 vendored 不影响任何端点；`queueAhead` 仍不落库。
+> 4. **§2.3 的锁顺序与线程职责未改** —— 路线 A 只是让 mysqld 跑在同一台机器上，不引入新的并发问题。
+>
+> **唯一一处跨章节的定量约束**（也是本轮最容易被漏掉的）：**§1.4 的闸门 4 → §2.3 的 worker 2 → §5.4.2.1 的兜底墙钟余量 2.9 倍 → §10.1 的 AC-38 四并发压测**。这四个数字是一条链，动一个必须重算另外三个 —— 这正是 §8.1.1 说的"交叉一致性"问题，环境轮把它又演示了一遍。
+
+---
+
+## 附录 A：环境安装与下载（Ubuntu 24.04 / 路线 A）
+
+对应 §6.7。本附录是**可直接复制执行**的操作手册。
+
+### A.1 一键安装服务端依赖
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  g++-12 gcc-12 make cmake pkg-config \
+  nlohmann-json3-dev libcpp-httplib-dev \
+  default-libmysqlclient-dev libssl-dev \
+  mysql-server
+```
+
+装完先验证三件事（任一不符立即停下排查）：
+
+```bash
+# ① cpp-httplib 头文件在 /usr/include/httplib.h（不是 cpp-httplib/ 子目录）
+dpkg -L libcpp-httplib-dev | grep httplib.h
+
+# ② 编译器是 12 而非宿主默认的 13
+g++-12 --version | head -1
+
+# ③ 密码哈希可用的 Blowfish 头文件
+ls /usr/include/openssl/blowfish.h
+```
+
+### A.2 下载前端三库（vendored）
+
+> ⚠️ **必须用 `/npm/` 路径** —— 实测 `/gh/` 对 `codemirror.min.js` 与 `marked.min.js` 返回 404。
+
+```bash
+V=5.65.16
+B=https://cdn.jsdelivr.net/npm
+mkdir -p static/vendor/cm/{mode/clike,addon/edit,addon/comment} \
+         static/vendor/LICENSES
+
+curl -sSL -o static/vendor/cm/codemirror.min.js                 $B/codemirror@$V/lib/codemirror.min.js
+curl -sSL -o static/vendor/cm/mode/clike/clike.min.js          $B/codemirror@$V/mode/clike/clike.min.js
+curl -sSL -o static/vendor/cm/addon/edit/matchbrackets.min.js  $B/codemirror@$V/addon/edit/matchbrackets.min.js
+curl -sSL -o static/vendor/cm/addon/edit/closebrackets.min.js  $B/codemirror@$V/addon/edit/closebrackets.min.js
+curl -sSL -o static/vendor/cm/addon/comment/comment.min.js      $B/codemirror@$V/addon/comment/comment.min.js
+curl -sSL -o static/vendor/marked.min.js                        $B/marked@12.0.2/marked.min.js
+curl -sSL -o static/vendor/purify.min.js                        $B/DOMPurify@3.1.6/dist/purify.min.js
+
+# 完整性自检：7 个文件全部 > 1KB。404 响应体只有 50~90 字节，会被这条抓住
+find static/vendor -name '*.js' -size -1k -print     # 应无任何输出
+ls -la static/vendor/cm static/vendor/*.js
+```
+
+**MIT LICENSE**（vendored 进产物必须保留原始声明，从各库仓库的 `LICENSE` 文件取得）：
+
+| 库 | LICENSE |
+|---|---|
+| CodeMirror 5 | MIT |
+| Marked 12 | MIT |
+| DOMPurify 3 | Apache-2.0 **或** MulanPSL-2.0（双许可，取其一即可） |
+
+### A.3 初始化本机 MySQL（路线 A）
+
+```bash
+sudo mysqld --initialize-insecure --user=mysql
+sudo mysqld_safe &
+
+# 1967MB 机器必须调低 buffer pool，否则会与 judge 抢内存被 OOM killer 优先杀
+sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"   # 64MB
+
+# 建库与账号（应用启动时会幂等建表，§2.1-A）
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
+                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
+                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
+```
+
+`.env`（`OJ_ADMIN_USERNAMES` 是 `users.role` 的唯一真源，见 §6.3.1）：
+
+```bash
+OJ_ALLOW_REGISTER=1
+OJ_ADMIN_USERNAMES=alise
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=oj
+MYSQL_PASSWORD=oj
+MYSQL_DB=oj
+OJ_LISTEN=0.0.0.0:8080
+OJ_JUDGE_WORKERS=2          # [D-74] 不得与 §1.4/§2.3 的推导值不一致
+OJ_JUDGE_GATE=4             # [D-74] = 2 × workers
+OJ_FENCE_MULTIPLIER=10      # [D-62] §5.4.2.1 的 ×10，改闸门前必须重算
+```
+
+### A.4 可选：路线 B（Docker）
+
+```bash
+sudo usermod -aG docker $USER     # ⚠️ 必须注销并重新登录才生效
+# 重新登录后验证：
+docker info >/dev/null && echo "docker 可用" || echo "仍未生效，检查是否已重新登录"
+```
+
+### A.5 镜像可达性备忘
+
+| 用途 | 可用地址 |
+|---|---|
+| 前端三库 | `https://cdn.jsdelivr.net/npm/<pkg>@<ver>/...` |
+| apt | `http://mirrors.tencentyun.com/ubuntu/`、`http://archive.ubuntu.com/ubuntu/` |
+| git remote | `git@gitee.com:Zhang--LinLing/cpp-oj-vibcoding.git`（SSH，已验证） |
+| ❌ 不可用 | `github.com`、`raw.githubusercontent.com`、`cdn.jsdelivr.net/gh/...` |
