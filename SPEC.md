@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.3（概览条 + 我的三 tab + 改密码 + 角色徽标） |
+| 版本 | v1.4（diff + 下一题推荐 + 草稿恢复 + 注销 + 队列位置） |
 | 日期 | 2026-10-02 |
 | 状态 | 规格已确认，进入实施 |
 | 交付周期 | 3 周 |
@@ -11,7 +11,7 @@
 
 ## 0. 决策溯源
 
-本文档由 41 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
+本文档由 61 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
 
 | # | 决策 | # | 决策 |
 |---|---|---|---|
@@ -38,8 +38,27 @@
 | — | — | D-39 | 个人主页**合并进** `history.html`（三 tab：提交记录 / 掌握分布 / 账户设置）；顶栏入口改名「我的」 |
 | — | — | D-40 | 账户管理**只做改密码**：验旧密码 + 踢掉其他会话（保留当前会话） |
 | — | — | D-41 | 顶栏**常驻显示角色徽标**；`admin.html` 仍严格只读，**D-37 不被推翻** |
+| — | — | **D-42 ~ D-61（v1.4 需求补全轮）** | |
+| D-42 | 同题两次提交**并排 diff**（行级高亮） | D-52 | 顶栏**同一组件条件渲染**两套形态（未登录/已登录） |
+| D-43 | 未登录**可读题面**，不可提交/收藏/看统计 | D-53 | 提交 id 存 **sessionStorage**，页面加载时自动恢复轮询 |
+| D-44 | 会话过期重登后**自动恢复草稿 + 提示** | D-54 | 提交时**告知队列位置** |
+| D-45 | 基于薄弱标签的**规则推荐「下一题」** | D-55 | 多标签页草稿冲突 → **检测到冲突就问用户**，不自动覆盖 |
+| D-46 | 多账号**不特殊处理**（无会话列表、不预填用户名） | D-56 | **账号注销**，需输密码确认 |
+| D-47 | 题目**方向提示 `hint_md`**，免费无限看 | D-57 | 注销 = **硬删除**（CASCADE 级联），不可恢复 |
+| D-48 | 题面**禁图片**，树/图题用字符画 | D-58 | 重跑失败的提交 = **新增一条**记录，不覆盖原记录 |
+| D-49 | 可**删除**自己的提交 + 可**重跑**失败的提交 | D-59 | 「下一题」推荐卡片放**题目页底部**，**带可解释理由** |
+| D-50 | diff 视图在**题目页内**，勾选两条展开 | D-60 | 队列位置语义 = **「你前面还有 N 个」**，不泄露全局长度 |
+| D-51 | 草稿**不特殊处理**（50 题 ≪ 5MB 上限） | D-61 | 提交历史默认**时间倒序 + 20 条/页** |
 
 > **D-38 ~ D-41 的共同取向：只加数据，不加页面。** 个人主页所需的统计、分类掌握度、账户信息三类需求，数据全部已存在于 `submissions` / `users` / `problem_tags`，**因此不需要新表、不需要新列、不需要新页面** —— 只缺聚合端点与展示位。故 `§3.2` 的 DDL 在 v1.3 **完全不变**，页面总数仍为五页。
+
+> **D-42 ~ D-61 是需求补全轮**，起因是逐条复核 v1.3 对本文档开头五项页面需求的**需求层**（而非设计层）覆盖度，发现 20 个空白 —— 大多是"线框里画了但需求层没定义"（如提示 tab）、"功能做了但异常路径没定义"（如会话过期时的草稿）、"新功能带出的新语义没定义"（如重跑的结果怎么落）。这一轮的取向是：
+>
+> | 取向 | 体现 |
+> |---|---|
+> | **补需求，不扩架构** | 20 项决策**没有一项引入新表**；DDL 仅新增 `problems.hint_md` 一列（D-47）。新增能力全部复用既有 11 张表 |
+> | **异常路径优先于新功能** | D-44（草稿恢复）、D-53（刷新恢复轮询）、D-55（草稿冲突）三条都不是"新功能"而是"已定功能在异常下的行为"，此前完全空白 |
+> | **每项都带明确的"不做什么"** | D-46（不做会话列表）、D-48（禁图片）、D-51（不清理草稿）、D-57（不做软删除）—— 与 v1.3 一贯的 conscious omission 风格 |
 
 ---
 
@@ -64,7 +83,7 @@
      → 轮询看到逐用例结果 → 回看提交历史 → 再次尝试
 ```
 
-**非目标（首版明确不做）**：多语言执行、竞赛/排行榜、实时推送、题解社区、支付、管理后台、移动端原生适配、真沙箱安全隔离、**独立个人主页页面**（统计/分类/账户合并进 `history.html` 的 tab，见 `[D-39]`）、找回密码、修改用户名、登出其他设备。
+**非目标（首版明确不做）**：多语言执行、竞赛/排行榜、实时推送、题解社区、支付、管理后台、移动端原生适配、真沙箱安全隔离、**独立个人主页页面**（统计/分类/账户合并进 `history.html` 的 tab，见 `[D-39]`）、找回密码、修改用户名、登出其他设备、**多账号会话快速切换** `[D-46]`、**题面图片**（树/图题用字符画，`[D-48]`）、**账号软删除/匿名化**（注销即硬删，`[D-57]`）、草稿容量淘汰策略 `[D-51]`、代码在线题解/讨论区。
 
 > **关于"管理后台"的澄清** `[D-37]`：v1.2 引入**最小角色体系** —— `users.role` 仅 `admin`/`user` 两值，管理员由 `.env` 的 `OJ_ADMIN_USERNAMES` **声明式指定**（启动时同步，见 §6.3.1），并配**一个只读**管理端点 `GET /api/admin/overview` 与**一个极简**页面 `admin.html`。这**仍然不是管理后台**：没有管理界面上的增删改、没有题库在线编辑、没有禁用/删除用户、没有 impersonation。角色可反复调整，但**调整途径是改配置 + 重启**，不是点按钮 —— 这与 §2.2 既定的「运行时改题需重启」运维模式一致，不引入第二套配置哲学。
 
@@ -81,6 +100,11 @@
 | P7 收藏 | 题目页右上角星标切换收藏，列表页可按"仅看收藏"筛选 |
 | P8 看进度 | 首页顶部概览条：已通过 X/N、按难度三个迷你进度条、最近 3 条提交；与「我的」tab2 **同源同数值** `[D-38]` |
 | P9 改密码 | 「我的」tab3：输入旧密码 + 新密码 → 验证通过后改密并**踢掉其他设备的会话**（当前会话保留，改密后不丢失登录态）`[D-40]` |
+| P10 未登录浏览 `[D-43]` | 未登录可读**全部题面**（相当于"题库阅读"）；提交按钮显示为「登录后提交」；收藏星标显示为描边态，点击弹登录框并记下当前题目路径 |
+| P11 对比复盘 `[D-42] [D-50]` | 题目页底部「你的最近提交」勾选任意两条 → 上方展开并排 diff，行级高亮 `+`/`-`，可一键把任一侧代码**回填到编辑器** |
+| P12 接着刷下一题 `[D-45] [D-59]` | 题目页底部「下一题建议」卡片：给出题名 + **可解释理由**（如"链表 · 你在此标签下 2/5 通过"）+ 一键跳转。已全部通过时改为展示完成度而非推荐 |
+| P13 删除与重跑 `[D-49] [D-58]` | 「我的」tab1 每条可**删除**（仅本人）；`failed`/`JE` 状态的条目额外提供**重跑**，重跑**新增一条**记录而非覆盖原记录 |
+| P14 注销账号 `[D-56] [D-57]` | 「我的」tab3 底部：输密码 → 二次确认弹窗（列明"提交历史将一并删除且不可恢复"）→ 硬删 `users` 行（级联清会话/提交/收藏）+ 清本机该用户草稿 → 回登录页 |
 
 > **P1 的角色部分不构成"切换"流程** `[D-41]`：普通用户与管理员之间**没有页面上的一键切换**。管理员身份的变更途径只有一条 —— 改 `.env` 的 `OJ_ADMIN_USERNAMES` 后重启（§6.3.1）。用户在页面上的动作只有两个：**切换账号**（登出后换一个人登录）与**看见自己是谁**（顶栏常驻角色徽标）。`admin.html` 因此保持**严格只读**，D-37 的核心论证不被推翻。
                      
@@ -97,6 +121,12 @@
 | 兼容性 | 桌面 Chrome/Edge/Safari 最近两个大版本；1280px 以上宽度 |
 
 > **v1.3 补充的两条非功能约束** `[D-40]`：改密码端点必须做到「**改密后当前会话仍有效**」（否则用户把自己踢下线，体验等同于登出失败）；`GET /api/me/overview` 的聚合成本必须让首页概览条保持 **P95 < 200ms**，因此该端点**不得**为了图省事而全表捞 `submissions` 回应用层聚合（聚合必须在 SQL 内完成，理由见 §6.5）。
+
+> **v1.4 补充的三条非功能约束**：
+>
+> 1. **diff 视图 P95 < 100ms** `[D-42]`。两份代码各 ≤ 64KB（§5.8），LCS 行级 diff 最坏 O(n·m) ≈ 4000×4000 行级比较，须在**前端内存内**完成（不上服务端），且 64KB 上限本身即是 diff 的性能护栏 —— 超过 64KB 的代码根本进不来。
+> 2. **注销必须"不可逆"这件事对用户可见** `[D-57]`。硬删意味着误操作无法挽回，因此二次确认弹窗必须**逐项列出**将被删除的数据（提交 N 条 / 收藏 M 题 / 会话 K 个），而不是一句"确定吗？"。这是硬删除方案能成立的**唯一前提**。
+> 3. **队列位置不得泄露全局负载** `[D-60]`。只返回"你前面还有 N 个"（你自己在队列中的序号），不返回全局队列长度、不含任何其他用户信息。理由见 §6.3.6。
 
 ---
 
@@ -229,6 +259,7 @@ CREATE TABLE problems (
   title         VARCHAR(128) NOT NULL,
   difficulty    ENUM('easy','medium','hard') NOT NULL,
   statement_md  MEDIUMTEXT   NOT NULL,           -- Markdown 原文，前端渲染
+  hint_md       MEDIUMTEXT   NULL,               -- 方向提示 Markdown，免费无限看（D-47）。NULL/空串则前端不渲染提示 tab
   signature     TEXT         NOT NULL,           -- Solution 类声明（见 §4）
   method_name   VARCHAR(64)  NOT NULL,           -- harness 调用的方法名
   return_type   VARCHAR(128) NOT NULL,           -- Solution 方法返回类型
@@ -457,6 +488,24 @@ SELECT COUNT(*) AS violations FROM (
 
 > 因此 v1.3 **不新增任何表或列**，`§3.2` 的 DDL 逐字不变。若日后题库或用户量级增长到聚合成为瓶颈，再物化 `byTag` 口径 —— 但那是**性能问题**，不是设计问题，不应提前预支。
 
+### 3.6 v1.4 的 DDL 变更：仅一列 `[D-42] [D-47] [D-49] [D-58]`
+
+D-42 ~ D-61 共 20 项决策，落到数据层的改动是：
+
+| 决策 | DDL 影响 | 说明 |
+|---|---|---|
+| D-47 题目提示 | **新增 `problems.hint_md`** | 见 §3.2，唯一的新列 |
+| D-49 删除自己的提交 | **无** | `DELETE FROM submissions WHERE id=?`，明细行由 `fk_scr_sub` / `fk_sce_sub` 的 CASCADE 连带删 |
+| D-56/D-57 注销账号 | **无** | `DELETE FROM users WHERE id=?`，`sessions` / `submissions` / `user_problems` 三条外键均为 CASCADE，二级 CASCADE 覆盖 `submission_case_results` / `submission_compile_errors` |
+| D-58 重跑 = 新增记录 | **无** | 与普通提交走同一条 INSERT |
+| D-60 队列位置 | **无** | 派生自 `submissions.status='pending'` 的计数，不落库（与 §3.5 同一立场） |
+| D-42 diff / D-45 推荐 | **无** | 纯查询 + 前端计算 |
+| 其余 15 项（前端行为/交互/文案） | **无** | — |
+
+**仍然 11 张表。** 这不是巧合：D-42 ~ D-61 全部落在"已有数据的读取方式"或"已有数据的操作入口"上，没有一项需要新的持久化形态。
+
+> **CASCADE 链的完整性是注销方案（D-57）能成立的前提**，必须验证：`users` → `submissions` → `submission_case_results` 是一条**两级 CASCADE 链**，InnoDB 支持且会在同一次语句中完成。若哪张子表被改成 `ON DELETE RESTRICT`，注销会直接失败 —— AC-33 专门验证这一点。
+
 
 ---
 
@@ -478,6 +527,7 @@ SELECT COUNT(*) AS violations FROM (
     "source": ["高频面试题"]
   },
   "statement_md": "## 题目描述\n\n给定一个整数数组 `nums` ...\n\n### 示例 1\n\n```\n输入: nums = [2,7,11,15], target = 9\n输出: [0,1]\n```\n\n### 约束\n\n- `2 <= nums.length <= 10^4`\n- 仅一个答案",
+  "hint_md": "先想想要不要重复遍历数组。答案的下标之和是 `target`，试试边遍历边记录**已经见过的值 → 下标**。",
   "signature": "class Solution {\npublic:\n    std::vector<int> twoSum(std::vector<int>& nums, int target);\n};",
   "method_name": "twoSum",
   "params": [
@@ -508,14 +558,17 @@ SELECT COUNT(*) AS violations FROM (
 
 | JSON 路径 | 目标列 | 展开 |
 |---|---|---|
-| `slug` `title` `difficulty` `statement_md` `signature` `method_name` `return_type` `code_template` `time_limit_ms` `mem_limit_kb` `harness_prelude` `is_featured` `sort_no` | `problems.*` 同名列 | 一题一行 |
+| `slug` `title` `difficulty` `statement_md` `hint_md` `signature` `method_name` `return_type` `code_template` `time_limit_ms` `mem_limit_kb` `harness_prelude` `is_featured` `sort_no` | `problems.*` 同名列 | 一题一行 |
 | `tags.algorithm[]` / `tags.source[]` | `tags` + `problem_tags` | 按 `category` 分别落 tag 行 |
 | `params[i].name` / `.cpp_type` | `problem_params` | 每形参一行，`param_idx = i` |
 | `cases[i].args` / `.expected` / `.brief` | `problem_cases.args_json` / `.expected_json` / `.brief` | 每用例一行，`case_idx = i` |
+| `hint_md` `[D-47]` | `problems.hint_md` | 缺省 `NULL`；为空则前端不渲染提示 tab |
 | — | `problems.case_count` | 同步完成后回填为该题用例行数 |
 
 > `harness_prelude` 是**可选**字段，缺省为空串。用到 `__expr` 逃生舱时填所需的前置声明/头文件，如 `"#include \"../common/treedef.h\"\nusing namespace oj;"`（见 §4.2）。
-> 注意：上面的 `statement_md` 为节省篇幅做了缩写（值里有 `...`），因此**整块并非可直接粘贴的合法 JSON**。录入时把 `statement_md` 换成完整的单行转义字符串（换写作 `\n`），其余字段可直接照抄。`cases` / `params` 的结构则是字面准确的。
+> `hint_md` 同为**可选** `[D-47]`，缺省为 `NULL`。为空时前端**不渲染提示 tab**（不是渲染一个空 tab）—— 50 道题里可能只有部分写了提示。`hint_md` 必须是**方向性**提示（"试试哈希表"），不是完整解法；不给答案是它存在的意义。
+> ⚠️ 题面**禁图片** `[D-48]`：`statement_md` 与 `hint_md` 中**不得出现 `![](...)` 语法**。树/图/矩阵题一律用**字符画**（放在 `pre` 代码块里，保留等宽对齐）。理由：题库 JSON 是唯一真源且纯文本，图片会引入静态资源管理、容器内改宿主文件的部署耦合、无法做文本 diff 三个问题（与 §6.3.4 不做题库在线编辑同源）。前端 DOMPurify 白名单相应**移除 `img`**（见 §7.3）。
+> 注意：上面的 `statement_md` 为节省篇幅做了缩写（值里有 `...`），因此**整块并非可直接粘贴的合法 JSON**。录入时把 `statement_md` / `hint_md` 换成完整的单行转义字符串（换写作 `\n`），其余字段可直接照抄。`cases` / `params` 的结构则是字面准确的。
 
 **同步语义**（`problem/loader.h`，幂等，按 slug）：题库是唯一真源且只增不改，故采用 **delete-then-insert** 而非逐行 upsert —— 先 `DELETE FROM problem_cases WHERE problem_id=?` 与 `DELETE FROM problem_params WHERE problem_id=?`，再按数组顺序整体插入，最后刷新 `case_count`。整个过程单事务。这样"从 JSON 删掉一个用例"能被正确传播到 DB，不会留下幽灵用例行。
 
@@ -845,6 +898,7 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 | 1008 | 500 | 服务器内部错误 | DB 异常、未捕获异常 |
 | 1009 | 503 | 判题服务不可用 | judge 调度器未启动/队列满 |
 | 1010 | 403 | 注册已关闭 | `OJ_ALLOW_REGISTER=0` 时的注册请求 `[D-37]` |
+| 1011 | 409 | 当前状态不允许该操作 | 重跑一条**非** `failed`/`JE` 状态的提交 `[D-58]`；未登录状态下点提交/收藏 `[D-43]` |
 | 2001 | 200 | 编译错误 | verdict=CE，非 API 错误 |
 | 2002 | 200 | 运行超时 | verdict=TLE |
 | 2003 | 200 | 内存超限 | verdict=MLE |
@@ -864,6 +918,7 @@ pending 重放的幂等性由设计保证：judge 全流程无外部副作用（
 | POST | `/api/auth/logout` | 否 | 删除会话行，清 Cookie |
 | GET | `/api/auth/me` | 是 | `{userId, username, role}`；未登录返回 401 |
 | POST | `/api/auth/password` `[D-40]` | 是 | `{oldPassword, newPassword}` → `200 {message:"密码已修改，其他设备的登录已失效"}`。详见 §6.3.5 |
+| DELETE | `/api/auth/account` `[D-56] [D-57]` | 是 | `{password}` → `200 {message:"账号已注销"}`。**硬删除**，详见 §6.3.7 |
 
 > **本组不新增错误码**：旧密码错误与新密码长度不足复用 **1001**，靠 `data.field` 区分（`oldPassword` / `newPassword`）。这与 §5.8「用户名/密码长度」共用 1001 的既有约定一致 —— 同一类问题不占两个码位。
 
@@ -993,16 +1048,109 @@ DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP();
 |---|---|---|---|
 | GET | `/api/tags` | 否 | `{algorithm:[...], source:[...]}` |
 | GET | `/api/problems` | 否 | query: `keyword` `difficulty` `tags`(逗号分隔) `progress`(none/attempted/solved) `favorite` `sort`(default/featured/easiest/hardest) `page` `size` → `{list:[...], total, page, size}` |
-| GET | `/api/problems/{slug}` | 否 | `{...题目详情, tags, isFavorite, myProgress, recentSubmissions:[最近5条]}` |
+| GET | `/api/problems/{slug}` | 否 | `{...题目详情, hint_md, tags, isFavorite, myProgress, nextRecommendation, recentSubmissions:[最近5条]}` `[D-42] [D-47] [D-59]` |
 | POST | `/api/problems/{slug}/favorite` | 是 | 切换收藏 → `{isFavorite: bool}` |
 
 **提交**
 
 | Method | Path | Auth | 说明 |
 |---|---|---|---|
-| POST | `/api/submissions` | 是 | `{problemSlug, language, code}` → `201 {submissionId, status:"pending"}` |
-| GET | `/api/submissions/{id}` | 是（仅本人） | `{id, status, verdict, message, caseResults, compileErrors, compilerOutput, casePassed, caseTotal, totalMs, maxMemKb, code, createdAt}` |
-| GET | `/api/submissions` | 是（仅本人） | query: `problemSlug` `verdict` `page` `size` → `{list:[...], total, ...}` |
+| POST | `/api/submissions` | 是 | `{problemSlug, language, code}` → `201 {submissionId, status:"pending", queueAhead}` `[D-54] [D-60]` |
+| GET | `/api/submissions/{id}` | 是（仅本人） | `{id, status, verdict, message, caseResults, compileErrors, compilerOutput, casePassed, caseTotal, totalMs, maxMemKb, code, createdAt, canRetry}` |
+| GET | `/api/submissions` | 是（仅本人） | query: `problemSlug` `verdict` `page` `size`（默认 `size=20`）→ `{list:[...], total, ...}` `[D-61]` |
+| GET | `/api/submissions/diff` `[D-42] [D-50]` | 是（两条**均**为本人） | query: `?from=12&to=15` → `{from:{id,code,createdAt}, to:{...}, hunks:[...]}`。见 §6.3.6 |
+| DELETE | `/api/submissions/{id}` `[D-49]` | 是（仅本人） | `200 {message:"提交记录已删除"}`。见 §6.3.6 |
+| POST | `/api/submissions/{id}/retry` `[D-49] [D-58]` | 是（仅本人） | `201 {newSubmissionId}` —— **新增一条**，原记录不变。见 §6.3.6 |
+
+#### 6.3.6 队列位置、diff、删除与重跑 `[D-42] [D-49] [D-54] [D-58] [D-60]`
+
+**① 队列位置 `queueAhead`**
+
+`POST /api/submissions` 的响应新增一个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `queueAhead` | **你前面还有几个 pending 任务**。`0` = 马上开跑；`n` = 前端显示「前面还有 n 个评测」 |
+
+计算方式（**不落库**，与 §3.5 同一立场）：
+
+```sql
+SELECT COUNT(*) FROM submissions
+WHERE status = 'pending' AND id < ?;   -- ? = 本次新建的 submission id
+```
+
+> **为什么用 `id < ?` 而不是读队列真实长度**：内存队列在多 worker 场景下**同时存在 `pending`（未启动）与 `judging`（正在跑）两组**，只有 `pending` 的数量才回答"还要等多久"。用 `id` 比较之所以成立，是因为队列是 **FIFO 且按 `id` 升序出队**（§2.1），更小的 `id` 必然排在前面。
+> ⚠️ **这条等价关系依赖 FIFO 假设** —— 若将来队列改为优先级队列，此处必须改为从 scheduler 读真实位置。这是一条需要在代码里留注释的隐含契约。
+>
+> **为什么不给全局队列长度**（D-60）：全局长度会泄露其他用户的并发负载（"现在有 7 个人在提交"），而这个数字对用户判断自己还要等多久毫无帮助。`queueAhead` 只回答自己的问题。
+
+**② 归属校验**（diff / 删除 / 重跑三个端点共用，**不放宽 admin**）
+
+```
+① 取 session → 无 → 1002
+② SELECT ... WHERE id = ? AND user_id = ?   ← 归属校验写进 WHERE，不单独查再比
+   无行 → 1003
+③ 再执行业务逻辑
+```
+
+**③ diff**
+
+```
+GET /api/submissions/diff?from=12&to=15
+```
+
+| 校验 | 失败返回 |
+|---|---|
+| `from` / `to` 缺失或非数字 | 1001 |
+| 任一条不属于当前用户（含 admin 查他人） | 1003（AC-20 的立场不变） |
+| `from == to` | 1001（无意义，diff 为空） |
+
+**响应**：
+
+```json
+{
+  "from": { "id": 12, "createdAt": "...", "code": "..." },
+  "to":   { "id": 15, "createdAt": "...", "code": "..." },
+  "hunks": [
+    { "type": "equal",  "leftStart": 1, "lines": ["class Solution {", "public:"] },
+    { "type": "remove", "leftStart": 3, "rightStart": null, "lines": ["    vector<int> twoSum(...);"] },
+    { "type": "add",    "leftStart": null, "rightStart": 3, "lines": ["    vector<int> twoSum(...) {"] }
+  ]
+}
+```
+
+> **为什么 diff 在服务端算**：两条记录的归属校验必须走 SQL（不能信任前端传来的 id），所以这次请求本来就要打一次 DB。既然已经在服务端了，**把两段代码一起返回、由前端算 diff** 才是对的分工 —— 服务端算 diff 只会多一次传输（两边都传了原文）和一个额外的 N×M CPU 消耗位置。
+> **diff 算法在纯前端**：LCS 动态规划，最坏 O(n·m)。§1.4 已论证 64KB 代码上限使这个规模可接受（典型 200 行 × 200 行 = 4 万次比较，毫秒级）。
+
+**④ 删除**
+
+```
+DELETE FROM submissions WHERE id = ? AND user_id = ?
+```
+
+`submission_case_results` / `submission_compile_errors` 由外键 CASCADE 连带删除，**无需显式 DELETE**（与 §3.6 注销同一条 CASCADE 链）。
+
+**⑤ 重跑**
+
+| 前置条件 | 不满足时 |
+|---|---|
+| 该 submission 属于当前用户 | 1003 |
+| `status = 'failed'` 且 `verdict = 'JE'` | **1011**「只有失败的提交可以重跑」 |
+
+成功时**新增一条**记录（`D-58`）：
+
+```sql
+-- 同一事务；复用原代码，但不复用原 status / verdict / 明细行
+INSERT INTO submissions (user_id, problem_id, language, code, status, created_at)
+SELECT user_id, problem_id, language, code, 'pending', UTC_TIMESTAMP()
+FROM submissions WHERE id = ?;
+```
+
+> **为什么不覆盖原记录**：覆盖会破坏 §3.1 确立的"提交历史不可变"前提；且 §3.4 的一致性断言（汇总列与明细行的同事务契约）要求覆盖时先删明细再重写，凭空多一个失败点。新增记录让重试走与普通提交**完全相同**的代码路径 —— **判题侧零改动**。
+>
+> **代价**：重跑与手动重提在历史里**无法区分**。要区分就得加 `retry_of` 自引用外键列（§3.6 明确不做）。个人自用场景下这个信息价值低，**用可解释性换简洁性**。
+>
+> **`canRetry` 字段**：`GET /api/submissions/{id}` 的响应带该布尔值，前端据此决定是否渲染「重跑」按钮，避免用户点了才收到 1011。
 
 **提交详情的数据组装**（`GET /api/submissions/{id}`）：
 
@@ -1065,6 +1213,34 @@ Body: { "oldPassword": "...", "newPassword": "..." }
 > **为什么不加改密限流**：威胁模型是"已登录用户改自己的密码"，攻击者需先持有一个有效会话。旧密码正确性校验 + 登录态门槛已足够，再加"每小时 N 次"只是形式 —— 且会误伤"改错密码后再改回来"的正常用户。**若日后要开放给不可信用户，与 §5.4 的隔离升级一并处理**，不单独为改密加锁。
 >
 > **与「登出其他设备」的关系**：`D-40` 选的是"改密时自动踢掉其他会话"，**没有**独立的"登出其他设备"按钮。理由：两者是同一个动作的两种触发方式，独立按钮省下的那点代码不足以抵消一次额外的接口设计。若用户只是想起草稿还在别人电脑上，改密码比找按钮更快。
+
+#### 6.3.7 注销账号端点 `[D-56] [D-57]`
+
+```
+DELETE /api/auth/account   Cookie: sid=...
+Body: { "password": "..." }
+
+200 → { "code":0, "message":"账号已注销" }
+1001 → data.field = "password"   （密码不匹配）
+1002 → 未登录
+```
+
+**实现要点（5 条）**：
+
+1. **必须验密码**。与改密同理（§6.3.5 要点 1）—— 防止用户离开时电脑被人直接点了注销。
+2. **一条 SQL 完成级联**，不逐表删：
+
+   ```sql
+   -- 走同一个全局 DB mutex（§2.3）
+   DELETE FROM users WHERE id = ?;
+   ```
+
+   外键链：`users` →`CASCADE` `sessions` / `submissions` / `user_problems`，`submissions` →`CASCADE` `submission_case_results` / `submission_compile_errors`。InnoDB 在同一条语句内完成整条链。
+3. **不动 `problems` / `problem_cases` / `tags`**。题库是全局共享资源（D-30 唯一真源在文件里），不属于任何用户。注销只删"这个人的痕迹"，题库对其他用户完好。
+4. **草稿清理在前端做**，后端无从下手（草稿在 localStorage）。前端需遍历 `localStorage` 中所有 `draft:*` 与 `history-prompt:*` 键删除 —— 因为草稿键**不含用户名**（§7.3），注销后若不清会留给下一个登录的人。**这是本端点最容易漏的一步。**
+5. **注销后清当前 Cookie**，并跳转 `/login.html?deleted=1`（让登录页显示一句"账号已注销"）。
+
+> **硬删除 vs 软删除**：选硬删除（`D-57`），代价是**不可恢复**。这个选择能成立的前提是 §1.4 那条约束 —— 二次确认弹窗必须**逐项列出**将被删除的数据量（提交 N 条 / 收藏 M 题 / 会话 K 个），而不是一句"确定吗？"。若做成软删除（加 `status` 列 + 匿名化 username），用户可以"反悔"，但代价是：① 改 DDL 加列；② 匿名化后 `OJ_ADMIN_USERNAMES` 按 username 匹配的语义要重新定义（§6.3.1）；③ "已注销用户"的提交历史要不要计入统计口径（§6.4）又成一个新问题。**单机自用场景下，为"反悔"付这三笔不划算。**
 
 
 ### 6.4 进度自动推导 `[D-16]`
@@ -1153,22 +1329,81 @@ GROUP BY p.difficulty;
 
 `AC-22` 会验证「一道挂 3 标签的已 AC 题在 3 个标签的 `total`/`solved` 中各计 1 次」，以及「`byDifficulty` 三个 `total` 之和 = 题目总数」。
 
+### 6.6 「下一题」推荐的规则 `[D-45] [D-59]`
+
+推荐卡片放**题目页底部**（`D-59`），数据由 `GET /api/problems/{slug}` 的 `nextRecommendation` 字段带回 —— **不单独开端点**，因为题目详情本来就要查，用户在同一屏内看到题面与建议，一次请求即可。
+
+**规则（纯规则计算，无随机、无机器学习）**：
+
+```
+候选集 = 该用户「未通过」的题（progress ≠ 'solved'，含从未做过的）
+对每个候选题 T 计算得分：
+    score(T) = 1000 / (1 + 薄弱度(主标签(T)))
+    其中 薄弱度(tag) = (tag_total - tag_solved) / tag_total
+                       —— 0 表示全通过（不薄弱），1 表示全未通过（最薄弱）
+同分时：difficulty ASC（先易后难）→ sort_no ASC（尊重题库编排顺序）
+```
+
+**可解释性是硬要求**（`D-59`）—— 卡片上必须写出推荐理由，用**算式本身**作为文案：
+
+> **下一题建议：反转链表**
+> 理由：`链表` 标签你通过 2/5，尚未通过且难度更低的候选题已刷完
+
+**边界情况**：
+
+| 情况 | 卡片表现 |
+|---|---|
+| 全部题目已通过 | **不显示推荐**，改为「🎉 题库 50/50 全部通过」+ 刷新题库的建议 |
+| 无未通过的题但有从未做过的题 | 走正常规则（从未做过 = `progress='none'`，属未通过） |
+| 用户未登录 `[D-43]` | **不显示推荐卡**（推荐依赖个人薄弱项，无 `user_id` 无法计算）。不显示而非显示"登录后推荐" —— 那是虚假的承诺 |
+| 薄弱项并列（多个标签同为 1/5） | 按难度→`sort_no` 决定，展示的理由仍用实际选中的那个标签 |
+
+> **为什么不用随机轮换**：面试备考的刷题路径应该是**可预期的** —— 用户点了"下一题"，期望看到的是系统认为最该补的那道。随机会让"薄弱优先"这个价值主张失效，页面退化成普通题库列表。
+>
+> **为什么不做学习路径/先修依赖**：那需要为题库额外维护 `prerequisites` 图（D-55 范围外的更大功能），且 50 道题的规模下价值有限。当前规则已能产出"先补最薄弱且最简单的"这一合理顺序。
+
 
 ---
 
 ## 7. 前端设计
 
-### 7.1 页面结构 `[D-32] [D-36] [D-37] [D-38] [D-39]`
+### 7.1 页面结构 `[D-32] [D-36] [D-37] [D-38] [D-39] [D-52]`
 
 | 页面 | 路径 | 内容 |
 |---|---|---|
-| 登录/注册 | `/login.html` | 切换式表单，登录成功跳 `list.html` |
-| 题库列表（**兼首页**）`[D-38]` | `/list.html` | **顶部个人概览条** + 筛选栏（关键词/难度/标签/进度/收藏）+ 题目表格 + 分页 |
-| 题目详情 | `/problem.html?slug=xxx` | 左右分栏工作台 |
-| **我的**（原「提交历史」）`[D-39]` | `/history.html` | 三 tab：**提交记录** `#records` / **掌握分布** `#progress` / **账户设置** `#account` |
+| 登录/注册 | `/login.html` | 切换式表单，登录成功跳 `list.html`。**不预填上次用户名** `[D-46]` |
+| 题库列表（**兼首页**）`[D-38]` | `/list.html` | **顶部个人概览条** + 筛选栏 + 题目表格 + 分页 |
+| 题目详情 | `/problem.html?slug=xxx` | 左右分栏工作台 + **提交 diff 面板** `[D-50]` + **下一题建议卡** `[D-59]` |
+| **我的**（原「提交历史」）`[D-39]` | `/history.html` | 三 tab：**提交记录** `#records`（含删除/重跑）`[D-49]` / **掌握分布** `#progress` / **账户设置** `#account`（含注销）`[D-56]` |
 | 运维概览 `[D-37]` | `/admin.html` | **仅 admin**：系统运行状态卡片 + 用户清单表。无任何写操作 |
 
-页面间用普通 `<a>` 链接跳转。每个页面独立引入所需 JS 模块，无构建步骤、无框架。**页面总数五页，v1.3 未新增页面。**
+页面间用普通 `<a>` 链接跳转。每个页面独立引入所需 JS 模块，无构建步骤、无框架。**页面总数仍是五页** —— v1.4 的 20 项决策**没有一项新增页面**。
+
+#### 顶栏的两套形态 `[D-52]`
+
+顶栏是**同一个组件**（`common.js` 的 `renderTopbar()`），按登录态条件渲染，**不做两套模板**：
+
+```
+未登录：
+┌────────────────────────────────────────────────────┐
+│  CppOJ      题库                     [登录] [注册]  │
+└────────────────────────────────────────────────────┘
+
+已登录（普通用户）：
+┌────────────────────────────────────────────────────┐
+│  CppOJ   题库   我的              alice   登出     │
+└────────────────────────────────────────────────────┘
+
+已登录（管理员）[D-41]：
+┌────────────────────────────────────────────────────┐
+│  CppOJ   题库   我的   运维      alice [管理员] 登出│
+└────────────────────────────────────────────────────┘
+```
+
+- **普通用户不渲染任何角色徽标**（不显示"普通用户"字样）—— 那是一条对每个用户都无信息量的标签
+- 顶栏的登录态由 `auth/me` 的返回决定：**1002 → 未登录形态**，其他 → 已登录形态
+- `login.html` 页**不渲染顶栏**（否则会同时出现"登录"按钮和"登出"按钮）
+- 题目页的顶栏压缩为单行（§7.2 线框），但**用的是同一个组件**，不做第二个实现
 
 #### 首页概览条 `[D-38]`
 
@@ -1243,23 +1478,32 @@ GROUP BY p.difficulty;
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ ← 返回   两数之和  [中等]  ⭐收藏          提交记录 | 题面 | 提示  │  ← 顶栏
+│ ← 返回   两数之和  [中等]  ⭐收藏          提交记录 | 题面 | 提示  │  ← 顶栏(压缩单行)
 ├──────────────────────────┬──────────────────────────────────────┤
 │                          │  [ C++ ▾ ]  [重置]  [提交 Ctrl+↵]    │  ← 工具栏
 │  Markdown 题面            ├──────────────────────────────────────┤
 │  (marked + DOMPurify      │                                      │
-│   渲染)                   │        CodeMirror 5                  │
+│   渲染, 无 img)            │        CodeMirror 5                  │
 │                          │        C++ 语法高亮                   │
 │  ### 题目描述             │        行号 / Tab 缩进                │
 │  ### 示例 1               │        (localStorage 自动保存)        │
 │      输入: ...            │                                      │
 │      输出: ...            │                                      │
 │  ### 约束                 │                                      │
-│  ### 提示 (点击展开)      │                                      │
+│  ### 提示 [D-47]         │                                      │
+│    (点击展开, 免费无限)   │                                      │
+│    [D-48] 树/图题用字符画  │                                      │
 │                          │                                      │
-│  ── 你的最近提交 ──       ├──────────────────────────────────────┤
-│  10:24  通过  3ms        │  ⣾ 评测中…   (每 1.5s 轮询)          │
-│  10:02  答案错误 [展开]   │                                      │
+│  ── 你的最近提交 [D-42] ─│  ⣾ 评测中…  前面还有 1 个评测         │
+│    ☑ 10:24  通过   3ms    │        (每 1.5s 轮询, sessionStorage) │
+│    ☐ 10:02  答案错误      │                                      │
+│  ┌─── diff (勾选两条展开) ┌┴─────────────────────────────────────┐ │
+│  │ −  vector<int> two(…) { │ +  vector<int> twoSum(...) {       │ │
+│  │ +  for (i…) if (…)      │ +      if (mp.count(t-n)) {       │ │
+│  │ [回填到编辑器]           │ [回填到编辑器]                      │ │
+│  └─────────────────────────┴────────────────────────────────────┘ │
+│  ── 下一题建议 [D-59] ──                                      │
+│  反转链表（简单）  理由: 链表 标签你通过 2/5    [去做这题 →]      │
 ├──────────────────────────┴──────────────────────────────────────┤
 │ 结果面板（可折叠，占详情页下半屏）                                  │
 │  状态: ❌ 答案错误   通过 2/3   总耗时 7ms   峰值内存 2.0MB          │
@@ -1273,7 +1517,7 @@ GROUP BY p.difficulty;
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-左右分栏比例可拖拽调节（`mousedown` 改 `flex-basis`，比例存 localStorage）。
+左右分栏比例可拖拽调节（`mousedown` 改 `flex-basis`，比例存 localStorage）。**diff 面板与建议卡都在左栏**（题面侧），因为它们都属于"复盘/导航"信息，与题面同属阅读流；结果面板占下半屏全宽，因为逐用例表格需要横向空间。
 
 ### 7.3 关键交互
 
@@ -1284,7 +1528,8 @@ GROUP BY p.difficulty;
 | 轮询 `[D-10]` | 提交后每 1.5s `GET /api/submissions/{id}`；`status` 变 `done`/`failed` 时停止并渲染结果。**组件卸载时清除定时器**；页面停留超过 5 分钟无结果则提示"评测耗时较长，可稍后在历史页查看" |
 | CodeMirror 设置 | `mode: text/x-c++src`, `lineNumbers: true`, `indentUnit: 4`, `tabSize: 4`, `indentWithTabs: false`, `matchBrackets: true`, `viewportMargin: 30` |
 | 编译错误高亮 | `compileErrors` 中 line 命中编辑器行号 → `cm.addLineClass(line, "background", "cm-error-line")`；悬停显示 message |
-| Markdown 渲染 | `marked.parse()` 后经 `DOMPurify.sanitize()`，白名单允许 `pre/code/h1~h6/table/ul/ol/li/strong/em/img/a` |
+| Markdown 渲染 | `marked.parse()` 后经 `DOMPurify.sanitize()`，白名单允许 `pre/code/h1~h6/table/ul/ol/li/strong/em/a/blockquote` —— **`img` 已移除** `[D-48]`（题面禁图片，字符画走 `pre`） |
+| 字符画对齐 `[D-48]` | 树/图/矩阵题用 `pre` 代码块内的等宽字符画；`pre` 样式设 `overflow-x: auto` + `white-space: pre`（窄屏横向滚动而不换行，换行会破坏图形） |
 | 时间显示 `[D-17]` | 接口返回 UTC ISO8601；前端 `new Date()` 转本地，先显示相对时间（"刚刚"/"3 分钟前"/"昨天 15:24"），`title` 属性放完整本地时间 |
 | 401 处理 | 任意接口返回 1002 → 全局跳转 `/login.html?redirect=<当前路径>` |
 | 运维入口 `[D-37]` | `common.js` 启动时调 `auth/me`，`role==='admin'` 时在顶栏渲染「运维」链接指向 `/admin.html`；否则不渲染。**后端 `/api/admin/overview` 独立校验 role**，前端隐藏不作为安全边界 |
@@ -1292,6 +1537,17 @@ GROUP BY p.difficulty;
 | 首页概览条 `[D-38]` | `list.html` 挂载时调 `GET /api/me/overview`；三个迷你进度条宽度 = `solved/total * 100%`，`total=0` 的难度整条不渲染；`recent` 每条渲染为「时间 + 题名 + 结论徽标」，点击跳 `/problem.html?slug=`。**不随筛选/分页重取**（分页只重发 `GET /api/problems`） |
 | 三 tab 切换 `[D-39]` | `history.html` 读 `location.hash` 决定激活 tab；点 tab 改 hash（触发 `hashchange`，不重新请求）。`overview` 结果缓存在模块级变量，**页面生命周期内只请求一次**，切 tab 与 tab1 分页都不重取 |
 | 改密码 `[D-40]` | tab3 表单：`type="password"` 两个输入框 + 提交。校验：非空、6–64 位、两次一致（不一致时前端拦下并标红，不发请求）。请求体 `{oldPassword, newPassword}`。1001 时按 `data.field` 把错误文案挂到对应输入框下方；成功则 toast + 清空表单 + **静默重拉 `auth/me`** |
+| 题目提示 `[D-47]` | `hint_md` 为空/缺省 → **不渲染提示 tab**；非空 → 渲染，点击展开，**免费无限看、无次数限制、无解锁流程**。`hint_md` 与 `statement_md` 走**同一条** marked + DOMPurify 渲染管线 |
+| 提交 diff `[D-42] [D-50]` | 题目页「你的最近提交」每行前置 checkbox，最多选 2 条。选满 2 条即调 `GET /api/submissions/diff` 并在上方展开并排双栏；LCS 行级 diff 在前端算（`diff.js` 独立模块）。每栏底部有「回填到编辑器」按钮，**会覆盖当前草稿**，点击前弹确认 |
+| 下一题建议 `[D-59]` | 题目页底部卡片，数据取自题目详情响应的 `nextRecommendation`。显示题名 + 难度 + **理由字符串**（服务端算好的可解释文案）+ 跳转按钮。全部通过时替换为完成度文案；**未登录时不渲染整张卡** |
+| 删除提交 `[D-49]` | 历史页每行「删除」按钮 → 确认弹窗（"这条提交记录将被永久删除，含 N 个用例结果"）→ `DELETE` → 移除该行并把 `total` 减一。**题面页的最近提交列表同步移除** |
+| 重跑提交 `[D-49] [D-58]` | 仅当该条 `canRetry=true`（`status='failed'`）时渲染「重跑」按钮 → `POST .../retry` → 用返回的 `newSubmissionId` 启动轮询。**原记录保持 `failed` 态不变**，历史里多出一条 `pending` |
+| 队列位置 `[D-54] [D-60]` | 提交返回的 `queueAhead`：为 0 时状态区只显示「评测中…」；`n>0` 时显示「前面还有 n 个评测」。**每秒递增一次**（轮询时用上一次的 `queueAhead - 1` 推算，不额外请求） |
+| 刷新恢复轮询 `[D-53]` | 提交成功后 `sessionStorage["judging:"+slug] = submissionId`；`problem.html` 挂载时若该键存在且对应提交 `status ∈ {pending,judging}` → 自动重建轮询与状态区；终态后删除该键。**用 sessionStorage 而非 localStorage** —— 评测态是 per-tab 的，不该在另一个标签页也转圈 |
+| 草稿冲突检测 `[D-55]` | 草稿写入时同存 `localStorage["draftAt:"+slug] = Date.now()`。页面挂载时：若 `draftAt` 晚于本页编辑器已加载草稿的时间 → 弹窗「此代码已在另一个标签页更新，是否载入？」→ 用户选后才替换，**不自动覆盖** |
+| 会话过期恢复草稿 `[D-44]` | 401 时跳转 `/login.html?redirect=<题目路径>&expired=1`。重新登录后跳回该题，`problem.html` 检测 `expired=1` → 若 `localStorage` 有该题草稿则自动载入并提示「已恢复你上次未完成的代码」 |
+| 顶栏两套形态 `[D-52]` | `common.js` 启动调 `auth/me`；1002 → 渲染「登录/注册」形态；200 → 渲染「我的/运维/用户名/角色徽标/登出」形态。`login.html` 不挂顶栏。题目页用同一组件的 compact 变体 |
+| 注销账号 `[D-56] [D-57]` | tab3 底部「注销账号」→ 弹窗要求**输密码** → 二次确认弹窗**逐项列出**待删数据量（提交 N 条 / 收藏 M 题 / 会话 K 个）+ 红字「不可恢复」→ 确认 → `DELETE /api/auth/account` → **清空 localStorage 中所有 `draft:*` 与 `draftAt:*`** + 清 Cookie → 跳 `/login.html?deleted=1` |
 
 ### 7.4 空态与错误态
 
@@ -1306,6 +1562,15 @@ GROUP BY p.difficulty;
 | **新用户零数据** `[D-38]` | `solved=0` 时概览条三个进度条渲染为空槽（0%），「最近提交」区显示「还没有提交记录，去做第一题 →」；tab2 的难度卡显示 `0/0` 而非空白 |
 | **`byTag` 为空** `[D-39]` | 题库未挂任何标签时 tab2 标签区显示「题库暂无标签分类」，不渲染空表头 |
 | 改密旧密码错 `[D-40]` | 旧密码输入框标红 + 「旧密码不正确」，`newPassword` 框保持已填值不清空（便于只改旧密码后重试） |
+| **未登录点提交** `[D-43]` | 提交按钮文案变为「登录后提交」；点击**不跳转**，而是弹登录框（内联小表单）→ 登录成功后自动跳回当前题并恢复提交意图（`sessionStorage` 暂存代码）。**不做**"点了就跳走"—— 正在写的代码会丢 |
+| **未登录点收藏** `[D-43]` | 星标渲染为描边态；点击弹登录框，登录后**不自动补收藏**（避免隐式写操作），只跳回该题 |
+| **未登录看个人内容** `[D-43]` | 「我的」入口在未登录形态下**不渲染**（顶栏条件渲染，`D-52`）；直连 `history.html` → 跳登录并带 redirect |
+| **diff 只选了一条** `[D-42]` | 提示「再选一条提交以对比」，不发起请求（省一次无意义的往返） |
+| **回填覆盖草稿** `[D-42]` | 「回填到编辑器」点击时弹确认「当前编辑器内容将被替换，草稿会被覆盖」→ 确认则写入 CodeMirror 并**立即触发草稿保存**（debounce 800ms 后落 localStorage） |
+| **重跑一条进行中的提交** `[D-58]` | 按钮不渲染（`canRetry=false`）；若绕过前端直接调接口 → 1011 |
+| **删除别人的提交** `[D-49]` | 1003；**admin 也不例外**（§6.3.6 ②，AC-20 立场不变） |
+| **注销时草稿残留** `[D-57]` | 注销成功后遍历 `localStorage` 删净所有 `draft:*` / `draftAt:*`（草稿键**不含用户名**，不清理会留给下一个登录的人） |
+| **全部题目已通过** `[D-59]` | 建议卡位置改为「🎉 题库 N/N 全部通过」+ 「想扩充题库？编辑 `problems/*.json` 后重启服务」（呼应 §6.3.4 声明式题库） |
 
 ---
 
@@ -1322,6 +1587,33 @@ GROUP BY p.difficulty;
 | **R-7** | **CDN 依赖不可达**（CodeMirror/marked 加载失败） | 编辑器不可用 | 中 | 启动时检测；`editor.js` 内置 `<textarea>` 降级路径，保证核心链路（写码→提交→看结果）不被阻断 |
 | **R-8** | **MySQL 首次初始化失败**（initdb 脚本仅首次执行） | 容器起来但无表 | 中 | 服务启动时检测表是否存在，不存在则**幂等执行** schema（`CREATE TABLE IF NOT EXISTS`）作为兜底 |
 | **R-9** | **严格资源限制误杀**（LeetCode 同级限制在本机偏紧） | 用户频繁 TLE | 中 | 题目 JSON 逐题可配 `time_limit_ms`/`mem_limit_kb`，默认取 LeetCode 同级值，录入时按需放宽 |
+| **R-10** | **v1.4 新增 6 个端点 + 1 列 DDL 落在原定 M3/M4 窗口内**，挤占题库录入时间 | 进度落后 | **中高** | 见 §8.1 的 v1.4 专项降级 |
+| **R-11** | **diff 的 LCS 在极端输入下 O(n·m) 内存爆炸** | 页面卡死 | 低 | 64KB 上限（§5.8）已封顶；再加「行数 > 2000 则降级为整体替换显示」的硬闸门（§1.4 的 100ms 约束） |
+| **R-12** | **注销的 CASCADE 链被后续改动破坏**（某张子表误改为 RESTRICT） | 注销静默失败或部分删除 | 低 | AC-33 专门验证级联完整性；所有 DDL 外键统一 `ON DELETE CASCADE` 作为团队约定 |
+| **R-13** | **`queueAhead` 的 FIFO 等价关系被打破**（队列改优先级后无人察觉） | 位置显示错误但不报错 | 低 | 依赖 FIFO 这条契约在 §6.3.6 显式标注为「需在代码里留注释的隐含契约」；AC-30 验证 FIFO 下取值正确 |
+
+### 8.1 v1.4 专项降级 `[D-42] [D-49] [D-59]`
+
+v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按「增量成本」排，不按重要性排**（与 §8 既有的 admin 降级同一原则）：
+
+```
+若 M4 结束时代码生成器或判题引擎尚未验收（进度落后 > 3 天）
+  → 第一刀：砍 diff（D-42/D-50）。它需要一个独立前端模块 + 并排布局 + 回填交互，
+           成本最高；而「展开看代码」的原功能（v1.2 已有）已能覆盖基本复盘。
+           砍后：历史页仍可逐条展开代码全文，闭环不受影响。
+  → 第二刀：砍「下一题建议」卡（D-45/D-59）。规则本身很轻，但需要新的候选集查询
+           + 理由文案拼接；砍后：题面页底部区块直接不渲染。
+  → 第三刀：砍注销与删除（D-49/D-56/D-57）。属于"用户自主权"而非核心闭环。
+  → 永不砍的四项（成本极低或直接补已有功能的坑）：
+       · 提示 hint_md（D-47）—— 一个字段 + 一个折叠块
+       · 队列位置 queueAhead（D-54/D-60）—— 一条 SQL + 一个 span
+       · 刷新恢复轮询（D-53）—— sessionStorage 读写
+       · 草稿冲突检测（D-55）—— 两个时间戳比较 + 一个 confirm
+           ↑ 这三项都是"已有功能在异常下的正确行为"，砍掉等于留 bug
+  → 端点层同步降级（同 T4.14 的"先砍页面后砍端点"原则）
+```
+
+> **为什么把「注销与删除」排在 diff 与推荐之后**：它们是**用户自主权**类功能（我想删/我想注销），属于锦上添花；diff 与推荐则是**复盘效率**类功能，直接影响备战体验的顺畅度。两者都不是 §1.2 闭环链路上的环节，所以砍掉都不影响成功标准。
 
 ### 降级触发规则
 
@@ -1342,6 +1634,9 @@ GROUP BY p.difficulty;
   → ③ 保留首页概览条（T4.15）与角色徽标（T4.18）—— 二者共用 `auth/me`，
     增量成本极低，且概览条是"打开就想看"的信息，砍掉等于首页失去个性
   → ④ 无论砍到哪一步，**`GET /api/me/overview` 端点都保留**（同 T4.14 的理由：端点是能力的本体）
+若整体进度落后 > 3 天（v1.4 新增功能 `[D-42~D-61]` 的降级顺序，详见 §8.1）
+  → ① 砍 diff → ② 砍下一题建议 → ③ 砍注销与删除
+  → 永不砍：hint_md / queueAhead / 刷新恢复轮询 / 草稿冲突检测（成本极低或直接补已有功能的坑）
 ```
 
 > **个人页的降级顺序是按「增量成本」排的，不是按「重要性」排** `[D-38~D-41]`。tab2 掌握分布虽然最有信息量，但它是唯一需要新写聚合 UI（难度卡 + 标签表 + 通过率条）的一块，成本最高；概览条只画三个进度条，且角色徽标直接复用已有的 `auth/me` 渲染分支。因此吃紧时先砍最贵的。**这与 §1.2「功能闭环可用」的成功标准一致** —— 概览条与徽标都不在闭环链路上，砍掉不影响 §1.2 的验收，而掌握分布砍掉也只是少一个可视化入口。
@@ -1356,7 +1651,7 @@ GROUP BY p.difficulty;
 
 - [ ] T0.1 目录骨架 + `docker-compose.yml`（mysql + oj 双容器，volumes，healthcheck）
 - [ ] T0.2 `Dockerfile`：基于 `ubuntu:22.04`，装 `g++-12`、MySQL Connector、cmake、bash
-- [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，11 张表，注意外键依赖顺序：`problems`/`users`/`tags` 须先建）
+- [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，**仍 11 张表**，注意外键依赖顺序：`problems`/`users`/`tags` 须先建；含 v1.4 新增的 `problems.hint_md`）
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
@@ -1442,6 +1737,28 @@ GROUP BY p.difficulty;
   - **不新增任何表或列**（§3.5）
 - [ ] **验收**：`curl` 走通注册→登录→列表→提交→轮询→历史全链路；另用 admin 账号 `curl /api/admin/overview` 返回 200、普通账号返回 1003
 - [ ] **验收**：改密链路 `curl` 走通 —— 登录拿 cookie A → 登录第二个终端拿 cookie B → 用 A 改密 → B 调 `auth/me` 返回 1002、A 仍返回 200、旧密码登录失败
+- [ ] T3.15 diff / 删除 / 重跑三个端点 `[D-42] [D-49] [D-58]`
+  - `GET /api/submissions/diff?from=&to=`：归属校验写进 `WHERE id=? AND user_id=?`（不单独查再比）；`from==to` → 1001；返回两段原文 + `hunks`，**diff 算法在前端**（服务端只传原文，见 §6.3.6）
+  - `DELETE /api/submissions/{id}`：明细行靠外键 CASCADE 连带删，**不显式 DELETE 子表**
+  - `POST /api/submissions/{id}/retry`：`status='failed' AND verdict='JE'` 才允许，否则 **1011**；成功则 `INSERT ... SELECT` 复用原代码新建一条，**不复用原 status/verdict/明细行**
+  - `GET /api/submissions/{id}` 响应追加 `canRetry` 布尔
+- [ ] T3.16 队列位置 `queueAhead` `[D-54] [D-60]`
+  - `POST /api/submissions` 在 INSERT 后跑 `SELECT COUNT(*) FROM submissions WHERE status='pending' AND id < ?`
+  - **⚠️ 在代码注释里写明这条 SQL 依赖「FIFO + 按 id 升序出队」**（§6.3.6 的隐含契约，R-13）
+  - **不返回全局队列长度**，不返回任何其他用户信息
+- [ ] T3.17 「下一题建议」`nextRecommendation` `[D-45] [D-59]`
+  - 并入 `GET /api/problems/{slug}` 响应，**不单独开端点**
+  - 规则见 §6.6：`score = 1000 / (1 + 薄弱度(主标签))`，同分按 difficulty ASC → sort_no ASC
+  - 候选集 = `progress ≠ 'solved'` 的题；**必须可解释** —— 返回值里带现成的理由文案字符串
+  - 全部通过 → 返回 `null`（前端渲染完成度）；**未登录 → 字段整个不下发**
+- [ ] T3.18 注销账号端点 `[D-56] [D-57]`
+  - `DELETE /api/auth/account {password}`：验密码 → 1001/field=password
+  - 成功路径**只有一条 SQL**：`DELETE FROM users WHERE id=?`，靠两级 CASCADE 完成（§3.6）
+  - **不删 `problems`/`problem_cases`/`tags`**（题库是全局资源）
+  - 走同一个全局 `DB mutex`；清当前 Cookie
+- [ ] T3.19 题库加载器支持 `hint_md` `[D-47]`
+  - 字段映射表补一行（§4.1）；缺省 `NULL` 而非空串（两者语义不同，前者"不渲染 tab"，后者"渲染空 tab"）
+- [ ] **验收**：六个新端点 `curl` 全通；`canRetry` 逻辑正确；`queueAhead` 在单任务时恒为 0
 
 ### M4 — 前端（Day 14–17）
 
@@ -1497,6 +1814,51 @@ GROUP BY p.difficulty;
   - 顶栏「提交历史」文案改为「我的」，指向 `history.html`（默认 `#records`）
 - [ ] **验收**：§1.2 成功标准链路端到端手动走通；admin 账号能打开 `admin.html` 看到状态与用户清单，普通账号看不到入口且直连被拒
 - [ ] **验收**：首页概览条与 tab2 的 `solved/total` **完全一致**（同一端点同一次请求，AC-24）；改密后其他设备被踢、当前设备不掉线
+- [ ] T4.19 顶栏两套形态 `[D-52]`
+  - `common.js` 的 `renderTopbar()` 单组件：`auth/me` 返 1002 → 登录/注册形态；200 → 我的/运维/用户名/角色徽标/登出形态
+  - `login.html` **不挂顶栏**；题目页用同一组件的 compact 变体（单行）
+  - 未登录形态下**不渲染**「我的」与「运维」入口（DOM 中不存在该元素）
+- [ ] T4.20 题目提示 `[D-47]`
+  - `hint_md` 为空/缺省 → **不渲染提示 tab**（不是渲染空 tab）
+  - 非空 → 渲染，可折叠展开，**无次数限制、无解锁流程**
+  - 与 `statement_md` **同一条** marked + DOMPurify 管线（`markdown.js` 加一个双参入口）
+- [ ] T4.21 提交 diff 模块 `[D-42] [D-50]`
+  - 新建 `static/js/diff.js`：LCS 行级 diff，输入两段代码输出 `hunks`（结构见 §6.3.6）
+  - **行数 > 2000 时降级为整体替换显示**（R-11 的硬闸门，防 O(n·m) 内存爆炸）
+  - 题目页「你的最近提交」每行加 checkbox，最多选 2 条，选满即请求并展开并排双栏
+  - 每栏底部「回填到编辑器」：点击弹确认 → 写入 CodeMirror → **立即触发草稿保存**
+- [ ] T4.22 「下一题建议」卡 `[D-59]`
+  - 题目页底部卡片：题名 + 难度徽标 + **理由字符串**（服务端给的，不前端编）+ 跳转按钮
+  - 全部通过 → 替换为「🎉 题库 N/N 全部通过」+ 提示编辑 `problems/*.json` 后重启
+  - **未登录 → 整张卡不渲染**（推荐依赖个人薄弱项，不做"登录后推荐"的虚假承诺）
+- [ ] T4.23 历史页删除 / 重跑 `[D-49] [D-58]`
+  - 每行「删除」→ 确认弹窗（含"含 N 个用例结果"）→ `DELETE` → 移除该行、`total` 减一
+  - `canRetry=true` 时才渲染「重跑」→ 成功后用 `newSubmissionId` 启动轮询
+  - **原记录保持 `failed` 不变**；历史里多一条 `pending`（用户要能理解这一点）
+- [ ] T4.24 队列位置显示 `[D-54] [D-60]`
+  - `queueAhead===0` → 只显示「评测中…」；`n>0` → 「前面还有 n 个评测」
+  - 轮询时用上一次的 `queueAhead - 1` 递减推算，**不为此额外发请求**
+- [ ] T4.25 刷新恢复轮询 `[D-53]`
+  - 提交成功后 `sessionStorage["judging:"+slug] = submissionId`
+  - `problem.html` 挂载时若该键存在且对应提交 `status ∈ {pending,judging}` → 重建轮询与状态区；终态后删键
+  - **用 sessionStorage 不用 localStorage** —— 评测态是 per-tab 的，不该在另一标签页也转圈
+- [ ] T4.26 草稿冲突检测 `[D-55]`
+  - 草稿写入同存 `draftAt:<slug> = Date.now()`
+  - 挂载时若 `draftAt` 晚于本页已加载草稿的时间 → `confirm`「此代码已在另一个标签页更新，是否载入？」；**用户选否则保留本页内容**
+- [ ] T4.27 会话过期恢复草稿 `[D-44]`
+  - 401 跳 `/login.html?redirect=<题目路径>&expired=1`
+  - 重登跳回后 `problem.html` 检测 `expired=1` → 载入 `localStorage` 草稿 + 提示「已恢复你上次未完成的代码」
+- [ ] T4.28 未登录访客交互 `[D-43]`
+  - 提交按钮 → 弹**内联登录框**（不跳转！跳转会丢正在写的代码）；登录成功后自动跳回并恢复提交意图
+  - 收藏星标 → 描边态，点击弹登录框；登录后**不自动补收藏**（不隐式写操作）
+  - 「我的」入口不渲染；直连 `history.html` → 跳登录带 redirect
+- [ ] T4.29 注销账号 `[D-56] [D-57]`
+  - tab3 底部「注销账号」→ 输密码 → **二次确认弹窗逐项列出待删数据量**（提交 N 条 / 收藏 M 题 / 会话 K 个）+ 红字「不可恢复」
+  - 确认 → `DELETE /api/auth/account` → **清空 localStorage 中所有 `draft:*` 与 `draftAt:*`** → 跳 `/login.html?deleted=1`
+  - 登录页据 `deleted=1` 显示「账号已注销」提示
+- [ ] T4.30 字符画样式 `[D-48]`
+  - `pre` 设 `overflow-x: auto` + `white-space: pre`（窄屏横向滚动而不换行，换行会破坏树/图形状）
+  - DOMPurify 白名单**移除 `img`**（§7.3 已同步）
 
 ### M5 — 题库录入与打磨（Day 18–21）
 
@@ -1527,6 +1889,23 @@ GROUP BY p.difficulty;
     3. 正常改密后：该用户**除当前 token 外**的会话行全部消失；当前 token 调 `auth/me` 仍 200
     4. 旧密码登录失败；新密码登录成功
     5. `user_id` 走预处理占位符（注入串 `' OR 1=1--` 作为密码时不影响其他用户行）
+  - **v1.4 CASCADE 链完整性断言** `[D-57]`（R-12，AC-33）：
+    ```sql
+    -- 断言 A：五张表的 users 侧外键全为 CASCADE
+    SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS
+    WHERE CONSTRAINT_SCHEMA = DATABASE()
+      AND DELETE_RULE <> 'CASCADE'
+      AND (REFERENCED_TABLE_NAME = 'users'
+           OR REFERENCED_TABLE_NAME = 'submissions');   -- 必须返回 0
+
+    -- 断言 B：真正级联删干净（造数据 → 注销 → 残留计数为 0）
+    -- users 会话、submissions、submission_case_results、submission_compile_errors、user_problems
+    ```
+  - **重跑不覆盖原记录断言** `[D-58]`：造一条 `failed/JE` 提交 → 调 retry → 断言原记录 `status`/`verdict` **未变**、新记录 `status='pending'`、两行 `code` 相同
+  - **`canRetry` 与 1011 断言**：`failed` → `canRetry=true`；`done` → `canRetry=false` 且直接调 retry 返回 1011
+  - **`queueAhead` FIFO 断言** `[D-60]`：连投 3 条提交（用极慢用例占住 worker）→ 断言第 1 条 `queueAhead=0`、第 2 条 `=1`、第 3 条 `=2`
+  - **删除自己的提交断言** `[D-49]`：删一条 `done` 提交 → 断言其 `submission_case_results` / `submission_compile_errors` 行也被清空（验证 CASCADE），且**另一用户的提交不受影响**
+  - **diff 归属断言** `[D-42]`：用户 A 用自己的 `from` + 用户 B 的 `to` → 1003（**含 A 是 admin 的情况**）
 - [ ] T5.4 压力测试：10 并发提交 × 20 轮，验证无崩溃、无永久 pending
 - [ ] T5.5 恶意输入测试：死循环 / 内存炸弹 / 超长输出 / fork bomb / 空代码
 - [ ] T5.6 README：架构说明、启动方式、题库编写指南、**`OJ_ADMIN_USERNAMES` / `OJ_ALLOW_REGISTER` 两个变量的作用与急救用 shell 命令（§6.3.1）**
@@ -1563,6 +1942,19 @@ GROUP BY p.difficulty;
 | AC-22 | 标签聚合不重复计数 `[D-39]` | 造一道**同时挂 3 个标签**且已 AC 的题 → 该题在**这 3 个标签**各自的 `byTag[].total` 与 `.solved` 中**各计 1 次**（若实现为直接 JOIN 后 `COUNT(*)`，会各计 3 次，测试必须能区分）；`byDifficulty` 三个 `total` 之和 = `problems` 表总行数；`byTag` 的 `total` 之和**≥** 题目总数（多标签题被重复计入是正确行为） |
 | AC-23 | 顶栏角色显示 `[D-41]` | admin 账号在任何页面顶栏可见 `管理员` 徽标 + 「运维」链接；普通账号**两者都不可见**（页面 DOM 中不存在该元素，不是 CSS 隐藏）；直连 `admin.html` 仍被 1003 拒（AC-19 保持成立）；首页概览条与顶栏的徽标文案一致 |
 | AC-24 | 概览条与 tab2 同源 `[D-38] [D-39]` | 首页概览条的 `已通过 x/N` 与三个难度进度条数值，与「我的」tab2 的难度卡**逐项相等**（同一端点、同一份响应、同一渲染模块 `overview.js`）；切换 tab 与 tab1 分页**不产生额外的 `/api/me/overview` 请求**（DevTools Network 验证） |
+| AC-25 | 未登录可读题 `[D-43]` | 未登录能打开**任意题**并看到完整题面与提示；提交按钮显示「登录后提交」；点收藏弹登录框；「我的」入口不渲染；直连 `history.html` 跳登录带 redirect；**未登录状态下 `GET /api/problems/{slug}` 的响应中不含 `nextRecommendation`** |
+| AC-26 | 题目提示 `[D-47]` | 有 `hint_md` 的题渲染提示 tab，点击可展开，**重复点击不消耗任何东西、无次数提示**；无 `hint_md` 的题**不渲染该 tab**（DOM 中不存在）；`hint_md` 走 marked + DOMPurify，`<script>` 被清除 |
+| AC-27 | 题面禁图片 `[D-48]` | 题面中的 `![](x.png)` 被 DOMPurify 过滤（渲染结果无 `img` 元素）；字符画题在窄屏（1024px）下 `pre` 横向滚动而**不换行**，图形不错行 |
+| AC-28 | 提交 diff `[D-42] [D-50]` | 题目页勾选两条提交 → 展开并排双栏，**仅实际差异行**带 `+`/`-` 标记，相同行不带；「回填到编辑器」把该侧代码写入编辑器且当前草稿被覆盖（弹过确认）；只选 1 条时不发请求；`from==to` 返回 1001 |
+| AC-29 | 删除与重跑 `[D-49] [D-58]` | 删除自己的提交：确认弹窗 → 记录消失，其用例结果行也被清空（验证 CASCADE），**题面页最近提交同步移除**；重跑 `failed` 提交：**原记录 `status`/`verdict` 未变**，历史多出一条新记录；重跑 `done` 提交 → 按钮不渲染，直接调接口返回 1011 |
+| AC-30 | 队列位置 `[D-54] [D-60]` | 连续投 3 条提交（占住 worker）→ 响应 `queueAhead` 依次为 `0/1/2`；前端显示「前面还有 n 个评测」；**响应中不含任何全局队列长度或其他用户信息** |
+| AC-31 | 刷新恢复轮询 `[D-53]` | 提交后在评测完成前**刷新页面** → 状态区自动重建并继续显示「评测中…」直至出结果；评测已完成后再刷新**不**重建（`sessionStorage` 键已清）；**另一个标签页不因本标签的评测而转圈**（sessionStorage 不共享） |
+| AC-32 | 草稿异常路径 `[D-44] [D-55]` | ① 写入草稿后手动改 `localStorage.draftAt` 为未来时间再刷新 → 弹「此代码已在另一个标签页更新，是否载入？」，选「否」则**保留本页内容不被覆盖**；② 会话过期跳登录、重登回到该题 → 草稿自动载入并提示「已恢复你上次未完成的代码」 |
+| AC-33 | 注销硬删除 `[D-56] [D-57]` | `information_schema` 中 `users`/`submissions` 侧的 `DELETE_RULE` **全为 CASCADE**（R-12）；注销后该用户的 `sessions`/`submissions`/`submission_case_results`/`submission_compile_errors`/`user_problems` 行**全部为 0**；**`problems`/`problem_cases`/`tags` 行数不变**（题库是全局资源）；密码错 → 1001 且不删任何数据；**二次确认弹窗逐项列出待删数据量**；注销后 localStorage 的 `draft:*` 全部清空 |
+| AC-34 | 下一题建议 `[D-45] [D-59]` | 卡片显示的推荐题 = 规则算出的最高分题（可用题库小规模人工核对）；**理由字符串非空且与选中题的主标签一致**；把该题 AC 之后推荐**发生变化**；全部题通过后卡片变为完成度文案；未登录不渲染卡片 |
+| AC-35 | 顶栏两套形态 `[D-52]` | 未登录：只有「登录/注册」；普通用户：有「我的/登出」无「运维/角色徽标」；admin：全部有且有 `管理员` 徽标；`login.html` 页面**不存在顶栏元素**；三种形态在题目页均能用 compact 变体渲染 |
+| AC-36 | diff/删除的归属不放宽 `[D-42] [D-49]` | AC-20 立场延续：用户 A 请求 B 的提交做 diff → 1003；A 删除 B 的提交 → 1003。**包括 A 是 admin 的情况** |
+| AC-37 | 历史分页与排序 `[D-61]` | 默认按 `created_at` 倒序、每页 20 条；翻页后顺序稳定不重不漏；筛选（题目/结论）与分页可组合 |
 
 ### 10.2 非功能验收
 
@@ -1586,6 +1978,9 @@ GROUP BY p.difficulty;
 | AR-3 | 线程模型 | 能说明为什么 DB 用全局互斥量而 judge 用独立 worker 池，以及为什么不加大 worker 数 |
 | AR-4 | 度量精度 | 能主动说明 `ru_maxrss` 是进程峰值而非单用例增量的精度限制 |
 | AR-5 | 范式取舍 | 能讲清"为什么逐用例结果要拆表（1NF 的一格多值）"，以及"为什么结果表存快照而不外键引用 `problem_cases`"——后者是业务需求（历史可回放）压过范式纯洁性的例子 |
+| AR-6 | 需求补全 | 能讲清 v1.4 那 20 项里"哪些是异常路径而非新功能"（D-44/D-53/D-55），以及"为什么 20 项需求只加了 1 列 DDL"（§3.6） |
+| AR-7 | CASCADE 链 | 能说明注销为什么能用一条 `DELETE FROM users` 完成，以及为什么这条链一旦被改成 RESTRICT 会静默失效（R-12） |
+| AR-8 | 隐含契约 | 能主动指出 `queueAhead` 的 `id < ?` 写法**依赖 FIFO 假设**（§6.3.6），并说明队列改优先级后该改哪里 |
 
 ---
 
@@ -1615,4 +2010,11 @@ V-3  验证 §5.3（stdout/stderr 分流是否可靠）
 本文档任何一处若需修改，先回到 §0 决策表确认该决策的来源与理由，再同步更新：
 架构图（§2）→ 数据模型（§3，含 §3.5 派生列判据）→ 题库 Schema（§4）→ 流水线（§5）→ API 契约（§6.3，含 §6.3.1–6.3.5）→ 聚合口径（§6.5）→ 前端交互（§7）→ 降级方案（§8）→ 验收标准（§10）。
 
-**v1.3 的联动面** `[D-38~D-41]`：本轮**未改 §3.2 的 DDL**（无新表新列，见 §3.5），改动集中在 **§0 决策表 / §1.2–1.4 / §6.3 / §6.5 / §7 / §8 / §9 / §10.1**。若将来要推翻"个人主页合并进 `history.html`"（`D-39`），连带需改的是 §7.1 的页面表、§6.1 的 `static/` 结构（会出现 `profile.html`）、§9 的 T4.10 与 T4.15–17、以及 AC-24 —— **而 §3 与 §5 完全不受影响**。
+**v1.3 的联动面** `[D-38~D-41]`：本轮**未改 §3.2 的 DDL**（无新表新列，见 §3.5），改动集中在 **§0 决策表 / §1.2–1.4 / §6.3 / §6.5 / §7 / §8 / §9 / §10.1**。
+
+**v1.4 的联动面** `[D-42~D-61]`：20 项需求，**DDL 只新增 `problems.hint_md` 一列**（见 §3.6），改动集中在 **§0 / §1.2–1.4 / §3.2 / §3.6 / §4.1–4.2 / §6.3（+6 端点、+1 错误码 1011、+§6.3.6、+§6.3.7、+§6.6）/ §7.1–7.4 / §8（+R-10~R-13、+§8.1）/ §9 / §10.1（+AC-25~AC-37）/ §10.3（+AR-6~AR-8）**。
+
+> **v1.4 特意没动的三处**，因为它们不该被这批需求带偏：
+> 1. **§5 判题流水线逐字未改** —— D-42~D-61 全部是"提交记录怎么读/怎么操作"，判题侧零改动。
+> 2. **§2 架构与线程模型未改** —— 没有新组件、没有新线程、没有新的中间件。
+> 3. **§3.4 的受控反范式立场未改** —— `queueAhead` 与推荐都刻意**不落派生列**，与 §3.5 同一逻辑。
