@@ -82,11 +82,11 @@
 > | §6.2 依赖表有 bcrypt | **24.04 官方源无 `libbcrypt-dev`** | `D-75` 走 OpenSSL Blowfish |
 > | §6.2「CodeMirror 5」一条依赖 | 实测 `codemirror.min.js` **不含任何语言模式**（grep `clike` = 0） | `D-73` 拆成 5 个文件条目 |
 >
-> 附带两处按实测环境做的选型调整：`D-72`（cpp-httplib 锁 apt 版）与 `D-74`（worker/闸门按实测资源下调）。完整清单见 **§6.7**，一键脚本见 **附录 A**。
+> 附带两处按实测环境做的选型调整：`D-72`（cpp-httplib 锁 apt 版）与 `D-74`（worker/闸门按实测资源下调）。完整清单与安装命令见 **§6.7**。
 >
 > **这一轮的取向**：环境问题**不回头改架构**。DDL、判题流水线、API 契约、错误码**全部零变更** —— 路线 A 与路线 B 的差别只在"谁负责拉起 mysqld 与 g++"，不触及任何业务逻辑。
 >
-> **v1.7 是对 v1.6 依赖清单的补正**（不新增决策）。起因是把 §6.7.2/附录 A 的清单放到"空白 Ubuntu 24.04"上逐条走了一遍，发现 v1.6 隐含假设了一台**已配置的机器**：
+> **v1.7 是对 v1.6 依赖清单的补正**（不新增决策）。起因是把 §6.7.2 的清单放到"空白 Ubuntu 24.04"上逐条走了一遍，发现 v1.6 隐含假设了一台**已配置的机器**：
 >
 > | 缺口 | 后果 | v1.7 处置 |
 > |---|---|---|
@@ -167,7 +167,7 @@
 > 2. **注销必须"不可逆"这件事对用户可见** `[D-57]`。硬删意味着误操作无法挽回，因此二次确认弹窗必须**逐项列出**将被删除的数据（提交 N 条 / 收藏 M 题 / 会话 K 个），而不是一句"确定吗？"。这是硬删除方案能成立的**唯一前提**。
 > 3. **队列位置不得泄露全局负载** `[D-60]`。只返回"你前面还有 N 个"（你自己在队列中的序号），不返回全局队列长度、不含任何其他用户信息。理由见 §6.3.6。
 
-> **v1.6 的资源下调声明** `[D-74]`：目标开发机实测 **2 核 / 1967MB**（§6.7.1），而 v1.0 假定的 4G 机器上 `worker 4 × 闸门 8` 会让 judge 与 HTTP 线程争抢内存。处置：
+> **v1.6 的资源下调声明** `[D-74]`：目标开发机实测 **2 核 / 1967MB**（§6.7），而 v1.0 假定的 4G 机器上 `worker 4 × 闸门 8` 会让 judge 与 HTTP 线程争抢内存。处置：
 >
 > | 参数 | 原值 | 现值 | 依据 |
 > |---|---|---|---|
@@ -1270,7 +1270,7 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 │   │                  compiler.h     # g++ 调用 + 输出解析 + 归属分流
 │   └── web/            routes.h  session.h  ratelimit.h  admin.h  # admin.h = require_admin 守卫 + overview
 ├── src/                （对应 .cpp）
-├── third_party/              # 【可选】自部署头文件（仅当 §6.7.2 的 apt 版本不满足时）
+├── third_party/              # 【可选】自部署头文件（仅当 §6.7.1 的 apt 版本不满足时）
 │   ├── httplib/httplib.h
 │   └── nlohmann/json.hpp
 ├── static/
@@ -1281,7 +1281,7 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 │           editor.js  markdown.js  poll.js  common.js  admin.js
 │           overview.js                  # v1.3：概览条 + 掌握分布的共享渲染与缓存（D-38/D-39）
 │           diff.js                      # v1.4：LCS 行级 diff，纯计算无网络（D-42/D-50）
-│   └── vendor/                        # 【前端三库 vendored，D-73】—— 完整清单见 §6.7.3
+│   └── vendor/                        # 【前端三库 vendored，D-73】—— 完整清单见 §6.7.2
 │       ├── cm/
 │       │   ├── codemirror.min.js           # 核心（不含任何语言模式）
 │       │   ├── mode/clike/clike.min.js     # C++ 高亮（注册 text/x-c++src）
@@ -1301,24 +1301,24 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 > `overview.js` 不引入任何框架，与其余 `js/` 模块同为原生 ES Module，由 `<script type="module">` 引入。
 > **`diff.js` 同样是纯计算模块** `[D-42]`：只做「两段代码 → hunks」，不发请求、不碰 DOM。这样 AC-28 的性能要求（§1.4 的 P95 < 100ms）可被独立测量，也让它能脱离页面单独测。
 >
-> **`<script>` 的加载顺序有依赖** `[D-73]`：CodeMirror 的 5 个文件必须按 `codemirror.min.js` → `mode/clike` → `addon/*` 顺序加载（addon 依赖核心已注册），且全部加 `defer`。这五个文件缺一的后果各不相同 —— **最坑的是 addon：缺失时配置项静默失效不报错**（§6.7.3 有对照表）。
+> **`<script>` 的加载顺序有依赖** `[D-73]`：CodeMirror 的 5 个文件必须按 `codemirror.min.js` → `mode/clike` → `addon/*` 顺序加载（addon 依赖核心已注册），且全部加 `defer`。这五个文件缺一的后果各不相同 —— **最坑的是 addon：缺失时配置项静默失效不报错**（§6.7.2 有说明）。
 
 ### 6.2 第三方依赖
 
-**服务端**（apt 包名、noble 实际版本、头文件路径的完整清单见 **§6.7.2**）：
+**服务端**（apt 包名、noble 实际版本、头文件路径的完整清单见 **§6.7.1**）：
 
 | 库 | apt 包 | 版本 | 用途 | 说明 |
 |---|---|---|---|---|
 | cpp-httplib | `libcpp-httplib-dev` | **0.14.3** `[D-72]` | HTTP 服务 | header-only，落在 `/usr/include/httplib.h`。`CPPHTTPLIB_OPENSSL_SUPPORT` 关闭（单机 HTTP） |
-| MySQL C Connector | `default-libmysqlclient-dev` | 8.0.46 | 数据库 | `/usr/include/mysql/mysql.h` |
+| MySQL C Connector | `libmysqlclient-dev` | 8.0.46 | 数据库 | `/usr/include/mysql/mysql.h`（`libmysqlclient-dev` 是其元包，装哪个都行） |
 | nlohmann/json | `nlohmann-json3-dev` | 3.11.3 | JSON 解析 | header-only，`/usr/include/nlohmann/json.hpp` |
 | **OpenSSL libcrypto** | `libssl-dev` | 3.0.13 | 密码哈希（Blowfish）`[D-75]` | **替代 `libbcrypt`** —— 24.04 官方源无 `libbcrypt-dev`；`/usr/include/openssl/blowfish.h` 已就位 |
 | ~~bcrypt (`libbcrypt`)~~ | ❌ | — | — | **24.04 官方源不存在此包**，`apt-cache search bcrypt` 无结果。见 §6.2.1 |
 | cpp-httplib OpenSSL | `libssl-dev` | 3.0.13 | HTTPS | **首版关闭**（§6.2 尾注），nginx 反代时再启用 |
 
-> **cpp-httplib 0.14.3 vs 0.15.3** `[D-72]`：apt 提供 0.14.3，低于本 SPEC 早期引用的 0.15.3。选 apt 版是为了**消除"宿主编过、容器编不过"的版本漂移**（§6.7.2）。若实现时用到 0.15 独有 API，改用 `third_party/httplib/httplib.h` 自部署 —— **两种部署方式的 include 写法都是 `#include <httplib.h>`，源码零差异**。
+> **cpp-httplib 0.14.3 vs 0.15.3** `[D-72]`：apt 提供 0.14.3，低于本 SPEC 早期引用的 0.15.3。选 apt 版是为了**消除"宿主编过、容器编不过"的版本漂移**（§6.7.1）。若实现时用到 0.15 独有 API，改用 `third_party/httplib/httplib.h` 自部署 —— **两种部署方式的 include 写法都是 `#include <httplib.h>`，源码零差异**。
 
-**前端**（全部 **vendored** 到 `static/vendor/` `[D-73]`，**不在运行时引 CDN**；文件清单与下载命令见 §6.7.3 与附录 A）：
+**前端**（全部 **vendored** 到 `static/vendor/` `[D-73]`，**不在运行时引 CDN**；文件清单与下载命令见 §6.7.2）：
 
 | 库 | 版本 | 用途 | 文件数 |
 |---|---|---|---|
@@ -1326,7 +1326,7 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 | Marked | 12.0.2 | 题面 Markdown 渲染 | 1 |
 | DOMPurify | 3.1.6 | XSS 过滤（配合 marked） | 1 |
 
-> ⚠️ **CodeMirror 5 不是单文件**。实测 `codemirror.min.js` 中 `clike` 出现次数为 **0** —— 它只是核心与 JS 基础语法。而 §7.3 的编辑器配置要求 `matchBrackets: true`、C++ 高亮、`Ctrl+/` 注释，**这些全部依赖单独加载的 mode / addon 文件，且缺失时静默失效不报错**。对照表见 §6.7.3。
+> ⚠️ **CodeMirror 5 不是单文件**。实测 `codemirror.min.js` 中 `clike` 出现次数为 **0** —— 它只是核心与 JS 基础语法。而 §7.3 的编辑器配置要求 `matchBrackets: true`、C++ 高亮、`Ctrl+/` 注释，**这些全部依赖单独加载的 mode / addon 文件，且缺失时静默失效不报错**。说明见 §6.7.2。
 >
 > **为什么 vendored 而非 CDN** `[D-73]`：① R-7 的"CDN 不可达"风险**从源头消除**，降级到 textarea 的路径随之降为防御性冗余、不强制实现；② §1.1 的"离线"定位在演示场景下（断网）只有 vendored 能挡；③ 代价是镜像多约 260KB 与附带 3 份 MIT LICENSE，量级可忽略。
 
@@ -1878,147 +1878,102 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 
 ---
 
-### 6.7 开发环境依赖（Ubuntu 24.04 / 路线 A） `[D-71] [D-72] [D-73] [D-75]`
+### 6.7 环境依赖与安装（Ubuntu 24.04 / 路线 A） `[D-71] [D-72] [D-73] [D-75]`
 
-本节是**在真实机器上核对过**的依赖清单，不是从文档推演的。核对日期与结论直接驱动了 §6.2 的库选型、§1.4 的资源下调、§8 R-7 的降级。
+按**空白 Ubuntu 24.04** 口径给出。开发机实测 2 核 / 1967MB（`D-74` 的下调依据）。
 
-#### 6.7.1 实测环境现状
+#### 6.7.1 包清单（12 个必需）
 
-**§6.7.2 的依赖清单按「空白 Ubuntu 24.04」口径给出**（即全部需要安装）。下表是本项目**实际开发机**的现状，两者差异即"已配置"与"空白"的差距 —— 空白机器上第 1 行标 ❌ 的项都需要装。
-
-| 项 | SPEC 目标 | 实测 | 结论 |
+| 用途 | 包 | 版本 | 头文件 |
 |---|---|---|---|
-| 系统 | Ubuntu 24.04 | 24.04.4 LTS (noble)，内核 6.8.0 | ✅ |
-| CPU | 2 核 | **2 核** | ✅ 刚好够 `worker 2 × 闸门 4` |
-| 内存 | 4G | **1967MB**（可用 426MB） | ⚠️ 触发 §1.4 的双档与 `D-74` 下调 |
-| 磁盘 | — | 50G 中 31G 可用（`/tmp` 为 judge 工作区） | ✅ |
-| 编译器 | g++ 12 / C++17 | 宿主默认 **g++ 13.3.0** | 需装 `g++-12` 显式对齐（D-13） |
-| 权限 | 装包需 root | **uid=1002，无免密 sudo** | 装包需交互输入密码 |
-| Docker | 双容器（路线 B） | 已装 29.6.1，但**用户不在 `docker` 组** | `permission denied on /var/run/docker.sock` → 走路线 A |
-| MySQL 服务端 | — | `mysqld` **已存在** 8.0.46 | 路线 A 可直接初始化，无需容器 |
-| `curl` / `git` / `make` | — | ✅ 已装 | — |
-| `ca-certificates` | — | ✅ 已装 | **空白系统必装**，缺失时报错像"证书过期" |
-| `cmake` / `pkg-config` | — | ❌ 未装 | **本就不需要**（§6.7.2 的 ⛔ 行） |
-| 四第三方库头文件 | §6.7.2 | ❌ 全缺 | 需 `sudo apt-get install` |
-| 前端工具链 | — | node 24.21 / npm 11.19 / python3 3.12 ✅ | **装包用 apt，不需要 node** |
+| 引导 | `ca-certificates` `curl` `git` | — | — |
+| 工具链 | `g++-12` `gcc-12` `make` | 12.4.0 / 4.3 | — |
+| | `libc6-dev` | 2.39 | `sys/{resource,wait,prctl}.h`、`unistd.h` |
+| 第三方库 | `nlohmann-json3-dev` | 3.11.3 | `nlohmann/json.hpp` |
+| | `libcpp-httplib-dev` | **0.14.3** | **`/usr/include/httplib.h`** |
+| | `libmysqlclient-dev` | 8.0.46 | `mysql/mysql.h` |
+| | `libssl-dev` | 3.0.13 | `openssl/blowfish.h` |
+| 数据库 | `mysql-server` `mysql-client` | 8.0.46 | — |
 
-**网络可达性实测**（决定下载源）：
+**明确不装**：`cmake`（构建用 Makefile）、`pkg-config`（库路径固定）、`build-essential`（连带装 g++-13，与 D-13 冲突）、`libbcrypt-dev`（24.04 官方源无此包，见 §6.2.1）。
 
-| 目标 | 可达 | 影响 |
-|---|---|---|
-| `cdn.jsdelivr.net/npm/...` | ✅ 200 | **前端库唯一可用的下载路径** |
-| `cdn.jsdelivr.net/gh/...` | ⚠️ **部分 404** | 同站不同路径可达性不同，**不要用 `/gh/`** |
-| `github.com` / `raw.githubusercontent.com` | ❌ 不可达 | 不能从 GitHub 直下任何东西 |
-| `gitee.com` | ✅ 200 | git remote 走 SSH（已配置并验证） |
-| `mirrors.tencentyun.com` | ✅ 200 | apt 主源 |
-| `archive.ubuntu.com` | ✅ | apt 备源 |
+> `libc6-dev` 虽由 `g++-12 → libstdc++-12-dev → libc6-dev` 传递带入，仍显式安装 —— judge 的 `getrusage`/`wait4`/`prctl` 头文件全靠它。
+> `libcpp-httplib-dev` 实测只装 `/usr/include/httplib.h`，**不是** `/usr/include/cpp-httplib/`。两种部署方式（apt / 自部署）都用同一行 `#include <httplib.h>`。
 
-#### 6.7.2 服务端包依赖（apt，noble 实测版本）
-
-按**空白的 Ubuntu 24.04** 口径列出 —— 即除系统自带的基础设施外全部需要安装。分组对应附录 A 的四个阶段。
-
-| 阶段 | 用途 | 包 | 版本 | 头文件路径 | 必需 |
-|---|---|---|---|---|---|
-| **① 引导** | HTTPS 根证书 | `ca-certificates` | 20260601 | — | ✅ **空白系统必需** |
-| | 下载器 | `curl` | 8.5.0 | — | ✅ 前端库下载 + `run_tests.sh` |
-| | 版本库 | `git` | 2.43.0 | — | ✅ 拉本仓库 |
-| **② 工具链** | C++ 编译器 | `g++-12` `gcc-12` | 12.4.0 | — | ✅ D-13 |
-| | 构建入口 | `make` | 4.3 | — | ✅ T0.1 的 Makefile |
-| | POSIX 头文件 | `libc6-dev` | 2.39 | `/usr/include/sys/{resource,wait,prctl}.h`、`unistd.h` | ✅ **显式列出**（见下方注） |
-| **③ 第三方库** | JSON | `nlohmann-json3-dev` | 3.11.3 | `/usr/include/nlohmann/json.hpp` | ✅ |
-| | HTTP | `libcpp-httplib-dev` | **0.14.3** | `/usr/include/httplib.h` | ✅ D-72 |
-| | DB 客户端 | `default-libmysqlclient-dev` | 8.0.46 | `/usr/include/mysql/mysql.h` | ✅ |
-| | 密码哈希 | `libssl-dev` | 3.0.13 | `/usr/include/openssl/{evp,blowfish}.h` | ✅ D-75 |
-| **④ 数据库** | DB 服务端 | `mysql-server` | 8.0.46 | — | ✅ 路线 A |
-| | DB 客户端 | `mysql-client` | 8.0.46 | — | ✅ **`run_tests.sh` 需要**（§3.4 断言 SQL） |
-| **⛔ 不装** | — | ~~`cmake`~~ | — | — | ❌ T0.1 已定 Makefile，两个构建系统并存只会让人不知用哪个 |
-| | — | ~~`pkg-config`~~ | — | — | ❌ 四个库路径固定，Makefile 直接写 `-lmysqlclient -lssl -lcrypto` |
-| | — | ~~`build-essential`~~ | — | — | ❌ 它会连带装 g++-13，与 D-13「锁 g++-12」相悖 |
-| | — | ~~`libbcrypt-dev`~~ | ❌ | — | ❌ 24.04 官方源无此包，见 §6.2.1 |
-
-> **为什么 `libc6-dev` 要显式列出**（尽管它由 `g++-12` 传递带入）：传递链是 `g++-12 → libstdc++-12-dev → libc6-dev`，实测确认存在，所以**不装也能编过**。但生成的 `tester.cpp` / `tester_util.h` 要用 `getrusage`（`<sys/resource.h>`）、`wait4`（`<sys/wait.h>`）、`prctl`（`<sys/prctl.h>`）、`fork`/`chdir`（`<unistd.h>`）—— **全部来自这个包**。显式列出是为了防止将来更换编译链时在某个机器上突然缺头文件。
->
-> **`ca-certificates` 为什么列为必需**：缺它时 `curl -sSL https://...` 报的错是 `SSL certificate problem: unable to get local issuer certificate`，**看起来像证书过期而非缺包**，排查成本高。空白系统必装。
->
-> **`libcpp-httplib-dev` 的文件布局**（实测 Ubuntu 包清单）：只含一个文件 **`/usr/include/httplib.h`**，**不是** `/usr/include/cpp-httplib/httplib.h`。因此：
->
-> ```cpp
-> #include <httplib.h>            // ✅ apt 装：/usr/include/httplib.h
-> #include <httplib.h>            // ✅ 自部署：-Ithird_party/httplib
-> ```
->
-> **两种部署方式同一行 include 均可，源码零差异，无需条件编译。** `[D-72]`
-
-#### 6.7.3 前端库文件清单（vendored） `[D-73]`
-
-**CodeMirror 5 不是单文件**。实测 `codemirror.min.js` 中 `clike` 出现 **0 次** —— 它只含核心与 JS 基础语法。§7.3 的编辑器要求（C++ 高亮、`matchBrackets`、`Ctrl+/`）**必须靠额外加载 mode / addon**，且：
-
-| 文件 | 作用 | 缺失后果 | 大小 |
-|---|---|---|---|
-| `cm/codemirror.min.js` | 核心 | 编辑器完全不出现 | 174 KB |
-| `cm/mode/clike/clike.min.js` | C++ 高亮（注册 `text/x-c++src`） | 无语法高亮 | 21 KB |
-| `cm/addon/edit/matchbrackets.min.js` | `matchBrackets: true` | ⚠️ **静默失效，不报错** | 3.5 KB |
-| `cm/addon/edit/closebrackets.min.js` | 自动补全 `{}` | 无自动补全 | 3.9 KB |
-| `cm/addon/comment/comment.min.js` | `Ctrl+/` 注释 | 快捷键无效 | 2 KB |
-| `marked.min.js` | 题面 Markdown | 题面显示原始源码 | 35 KB |
-| `purify.min.js` | XSS 过滤 | ⚠️ **安全缺口** | 21 KB |
-
-合计约 **260 KB**，另附 3 份 MIT LICENSE（vendored 进产物必须保留原始许可声明）。
-
-> **`matchbrackets` 那行是本清单存在的主要理由**：只加载 `codemirror.min.js` 时，`matchBrackets: true` **不报错也不生效**。CodeMirror 5 的 addon 是"配置项存在但无对应实现"，这种静默失败排查成本极高。**把 5 个文件列成依赖表，而不是写一句"CodeMirror 5"，是对文档精度要求的兑现。**
-
-#### 6.7.4 下载命令
-
-> ⚠️ **必须用 `/npm/` 路径。** 实测 `/gh/` 对 `lib/codemirror.min.js` 与 `marked.min.js` 均返回 404，而 `/npm/` 全部 200。
+#### 6.7.2 全部安装命令
 
 ```bash
-# ===== 前端三库 vendored [D-73] =====
-V=5.65.16
-B=https://cdn.jsdelivr.net/npm
-mkdir -p static/vendor/cm/{mode/clike,addon/edit,addon/comment} \
-         static/vendor/LICENSES
-
-curl -sSL -o static/vendor/cm/codemirror.min.js                 $B/codemirror@$V/lib/codemirror.min.js
-curl -sSL -o static/vendor/cm/mode/clike/clike.min.js          $B/codemirror@$V/mode/clike/clike.min.js
-curl -sSL -o static/vendor/cm/addon/edit/matchbrackets.min.js  $B/codemirror@$V/addon/edit/matchbrackets.min.js
-curl -sSL -o static/vendor/cm/addon/edit/closebrackets.min.js  $B/codemirror@$V/addon/edit/closebrackets.min.js
-curl -sSL -o static/vendor/cm/addon/comment/comment.min.js      $B/codemirror@$V/addon/comment/comment.min.js
-curl -sSL -o static/vendor/marked.min.js                        $B/marked@12.0.2/marked.min.js
-curl -sSL -o static/vendor/purify.min.js                        $B/DOMPurify@3.1.6/dist/purify.min.js
-
-# 完整性自检：7 个文件，每个都应 > 1KB（404 响应体只有 50~90 字节）
-find static/vendor -name '*.js' -size -1k -print   # 应无输出
-
-# ===== 自部署头文件（仅当需要 cpp-httplib 0.15.x 时）[D-72] =====
-# mkdir -p third_party/httplib third_party/nlohmann
-# curl -sSL -o third_party/httplib/httplib.h \
-#   $B/../gh/yhirose/cpp-httplib@v0.15.3/httplib.h   # ⚠️ /gh/ 对此仓库可用性需实测
-```
-
-#### 6.7.5 一键安装（路线 A）
-
-```bash
+# ---------- apt ----------
 sudo apt-get update && sudo apt-get install -y \
-  g++-12 gcc-12 make cmake pkg-config \
-  nlohmann-json3-dev libcpp-httplib-dev \
-  default-libmysqlclient-dev libssl-dev \
-  mysql-server
+  ca-certificates curl git \
+  g++-12 gcc-12 make libc6-dev \
+  nlohmann-json3-dev libcpp-httplib-dev libmysqlclient-dev libssl-dev \
+  mysql-server mysql-client
 
-# 初始化并启动 MySQL（无 systemd 的环境下用 mysqld_safe）
+# ---------- 前端 7 个文件（vendored）----------
+# ⚠️ 必须用 /npm/ 路径：/gh/ 实测对 codemirror.min.js 与 marked.min.js 均 404
+cd /home/ZL/project/cpp-oj-vibcoding
+V=5.65.16; B=https://cdn.jsdelivr.net/npm
+mkdir -p static/vendor/cm/{mode/clike,addon/edit,addon/comment}
+
+curl -sSL -o static/vendor/cm/codemirror.min.js                $B/codemirror@$V/lib/codemirror.min.js
+curl -sSL -o static/vendor/cm/mode/clike/clike.min.js         $B/codemirror@$V/mode/clike/clike.min.js
+curl -sSL -o static/vendor/cm/addon/edit/matchbrackets.min.js $B/codemirror@$V/addon/edit/matchbrackets.min.js
+curl -sSL -o static/vendor/cm/addon/edit/closebrackets.min.js $B/codemirror@$V/addon/edit/closebrackets.min.js
+curl -sSL -o static/vendor/cm/addon/comment/comment.min.js     $B/codemirror@$V/addon/comment/comment.min.js
+curl -sSL -o static/vendor/marked.min.js                       $B/marked@12.0.2/marked.min.js
+curl -sSL -o static/vendor/purify.min.js                       $B/DOMPurify@3.1.6/dist/purify.min.js
+
+# ---------- MySQL 初始化 ----------
 sudo mysqld --initialize-insecure --user=mysql
 sudo mysqld_safe &
-# 1967MB 机器必须调低 buffer pool，否则会与 judge 抢内存 [D-74]
-# 见 §9 T0.1 的启动脚本
+sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"   # 1967MB 机器必调 64MB，否则与 judge 抢内存
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
+                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
+                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
 ```
 
-#### 6.7.6 路线 B 的额外前提（当前机器不满足）
+**CodeMirror 5 不是单文件** —— 核心 `codemirror.min.js` 实测 `clike` 出现 0 次，必须额外加载 `mode/clike`（C++ 高亮）与 3 个 addon。加载顺序 `core → mode → addon`，全部加 `defer`。**addon 缺失时配置项静默失效不报错**（如漏 `matchbrackets` 则 `matchBrackets: true` 无效）。
+
+#### 6.7.3 `.env`
 
 ```bash
-sudo usermod -aG docker $USER    # ⚠️ 必须【注销并重新登录】才生效
-sudo dockerd &                   # 无 systemd 时手动拉起
+OJ_ALLOW_REGISTER=1
+OJ_ADMIN_USERNAMES=alise        # 角色唯一真源（D-37），须为已存在的用户名
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=oj
+MYSQL_PASSWORD=oj
+MYSQL_DB=oj
+OJ_LISTEN=0.0.0.0:8080
+OJ_JUDGE_WORKERS=2              # [D-74]
+OJ_JUDGE_GATE=4                 # [D-74] 必须 = 2 × workers
+OJ_FENCE_MULTIPLIER=10          # [D-62] §5.4.2.1 的 ×10，改闸门前必须重算
 ```
 
-生效后 `docker info` 应能连通；未生效时会持续报 `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock`（这是本次实测到的原始报错）。
+> `OJ_JUDGE_GATE` → 墙钟放大倍数 → 兜底墙钟余量 → 压测口径（AC-38）**是一条链**，改一个要重算其余（§5.4.2.1）。
+
+#### 6.7.4 验证（6 项，全绿才继续）
+
+```bash
+g++-12 --version | head -1                             # 应为 12.x
+dpkg -L libcpp-httplib-dev | grep httplib.h           # 应为 /usr/include/httplib.h
+ls /usr/include/{nlohmann/json.hpp,mysql/mysql.h,openssl/blowfish.h}
+ls /usr/include/sys/{resource.h,wait.h,prctl.h}
+find static/vendor -name '*.js' -size -1k | wc -l      # 应为 0（404 响应体只有几十字节）
+mysql -h 127.0.0.1 -uoj -poj oj -e "SELECT VERSION();"
+```
+
+#### 6.7.5 可选：路线 B（Docker）
+
+```bash
+sudo usermod -aG docker $USER     # ⚠️ 必须注销重新登录才生效
+sudo dockerd &                    # 无 systemd 时手动拉起
+docker info >/dev/null && echo "docker 可用"
+```
+
+未执行第一步时的典型报错：`permission denied while trying to connect to the docker API at unix:///var/run/docker.sock`。
+
 ---
 
 ## 7. 前端设计
@@ -2342,10 +2297,10 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 ### M0 — 地基（Day 1–2）
 
-- [ ] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **附录 A.1 四阶段** + **A.2** 的下载命令 + **A.6** 的 7 项验证
+- [ ] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **§6.7.2 的全部命令** + **§6.7.4 的 6 项验证**
   - **7 项验证必须全绿才继续**，尤其第 ⑦ 项（fork+setrlimit+prctl+wait4）—— 它失败意味着 §5 全部机制不可用
   - 初始化本机 `mysqld`，**把 `innodb_buffer_pool_size` 设为 64MB**（1967MB 机器上不调会与 judge 抢内存，见 §2.1-A 第 3 条）
-  - 装 **不要** `cmake` / `pkg-config` / `build-essential`（§6.7.2 的 ⛔ 行，理由见该节）
+  - 装 **不要** `cmake` / `pkg-config` / `build-essential`（§6.7.1 的「明确不装」行，理由见该节）
 - [ ] T0.1 目录骨架 + **`Makefile`（路线 A 主入口）** `[D-71]`
   - `make build` / `make run` / `make test` / `make clean`
   - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `./oj`
@@ -2768,7 +2723,7 @@ V-3  验证 §5.3（stdout/stderr 分流是否可靠）
 > 2. **§2 架构与线程模型未改** —— 没有新组件、没有新线程、没有新的中间件。
 > 3. **§3.4 的受控反范式立场未改** —— `queueAhead` 与推荐都刻意**不落派生列**，与 §3.5 同一逻辑。
 
-**v1.6 的联动面** `[D-71~D-75]`：环境落地轮。**DDL 零变更**（11 张表、0 列），**API 契约与 20 条错误码零新增**。改动集中在 **§0（+5 决策）/ §1.4（并发 8→4、内存双档）/ §2.1（拆 A/B 两图）/ §2.3（worker 4→2 + 闸门比例关系式）/ §5.4.2.1（新增兜底墙钟定量关系式）/ §6.1（+third_party、+static/vendor、+.gitignore、+Makefile）/ §6.2（httplib 版本与 CodeMirror 拆 5 文件）/ §6.2.1（新增 bcrypt 替代方案）/ §6.7（新增完整环境清单）/ §8（+R-20、R-7 标为已消除）/ §9（新增 T0.0、改写 T0.1/T0.2/T0.3/T3.3/新增 T0.6、AC 口径）/ §10.1（AC-38 改 4 并发、+AC-48/AC-49）/ 附录 A（新增）**。
+**v1.6 的联动面** `[D-71~D-75]`：环境落地轮。**DDL 零变更**（11 张表、0 列），**API 契约与 20 条错误码零新增**。改动集中在 **§0（+5 决策）/ §1.4（并发 8→4、内存双档）/ §2.1（拆 A/B 两图）/ §2.3（worker 4→2 + 闸门比例关系式）/ §5.4.2.1（新增兜底墙钟定量关系式）/ §6.1（+third_party、+static/vendor、+.gitignore、+Makefile）/ §6.2（httplib 版本与 CodeMirror 拆 5 文件）/ §6.2.1（新增 bcrypt 替代方案）/ §6.7（新增环境依赖与安装命令）/ §8（+R-20、R-7 标为已消除）/ §9（新增 T0.0、改写 T0.1/T0.2/T0.3/T3.3/新增 T0.6、AC 口径）/ §10.1（AC-38 改 4 并发、+AC-48/AC-49）**。
 
 > **v1.6 特意没动的四处**，因为环境问题**不该回头改架构**：
 > 1. **§3.2 DDL 逐字未改** —— 换构建方式、换 bcrypt 实现、换前端加载方式，都不改变持久化形态。`password_hash` 仍 255 宽、仍存 60 字符的 bcrypt 输出。
@@ -2778,204 +2733,8 @@ V-3  验证 §5.3（stdout/stderr 分流是否可靠）
 >
 > **唯一一处跨章节的定量约束**（也是本轮最容易被漏掉的）：**§1.4 的闸门 4 → §2.3 的 worker 2 → §5.4.2.1 的兜底墙钟余量 2.9 倍 → §10.1 的 AC-38 四并发压测**。这四个数字是一条链，动一个必须重算另外三个 —— 这正是 §8.1.1 说的"交叉一致性"问题，环境轮把它又演示了一遍。
 
-**v1.7 的联动面**（**不新增决策，仍 75 项**）：纯依赖清单的事实性补正。改动仅 **§0（+v1.7 补正说明）/ §6.7.1（区分"空白"与"已配置"）/ §6.7.2（按四阶段分组、+5 必需项、−3 不需要项）/ 附录 A（A.1 拆四阶段+A.2+A.3+A.6，新增 A.6 的 7 项验证）/ §9 T0.0（改为指向 A.6）**。
+**v1.7 的联动面**（**不新增决策，仍 75 项**）：纯依赖清单的事实性补正。改动仅 **§0（+v1.7 补正说明）/ §6.7（整章重写为「包清单 + 全部命令」，原 6 个子节与附录 A 合并为一处，+5 必需项、−3 不需要项）/ §9 T0.0（改为指向 §6.7）**。
 
-> **v1.7 刻意没动的四处**：① **决策表** —— 这轮是"清单对不上现实"，不是"需要做新选择"，不占决策号；② **§3.2 DDL** —— 依赖装法与持久化形态无关；③ **§2.1-A/B 两张图** —— 路线划分不变，只是不再假设机器已配好；④ **附录 A.4/A.5**（Docker 与镜像备忘）—— 路线 B 仍为可选，内容不受影响。
+> **v1.7 刻意没动的四处**：① **决策表** —— 这轮是"清单对不上现实"，不是"需要做新选择"，不占决策号；② **§3.2 DDL** —— 依赖装法与持久化形态无关；③ **§2.1-A/B 两张图** —— 路线划分不变，只是不再假设机器已配好；④ **Docker 相关内容** —— 路线 B 仍为可选，合并进 §6.7.5 后不受影响。
 
 ---
-
-## 附录 A：环境安装与下载（Ubuntu 24.04 / 路线 A）
-
-对应 §6.7。**§6.7.2 的依赖清单与本附录均按「空白 Ubuntu 24.04」口径**。执行顺序：**A.1（四阶段）→ A.2（下载前端库）→ A.3（配置 .env）→ A.6（7 项验证）**，全部通过后再 `make build`。A.4 / A.5 为补充参考。
-
-### A.1 安装（空白 Ubuntu 24.04 · 四阶段）
-
-依赖清单见 §6.7.2。**四个阶段有先后依赖**（① 提供下载器与证书，② 才能编译，④ 要等②③就绪才能连库），不要跳着执行。
-
-#### 阶段 ① 引导层
-
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-  ca-certificates \      # 缺它 curl -sSL 会报 SSL certificate problem（像证书过期，不像缺包）
-  curl \                 # 下载前端库 + run_tests.sh 调 API
-  git                    # 拉本仓库
-```
-
-#### 阶段 ② 编译工具链
-
-```bash
-sudo apt-get install -y \
-  g++-12 gcc-12 \
-  make \
-  libc6-dev              # judge 的 getrusage / wait4 / prctl / fork 头文件来自这里
-```
-
-> **不要装** `build-essential`（会连带装 g++-13，与 D-13 冲突）；`cmake` / `pkg-config` 本项目用不到（§6.7.2）。
-
-#### 阶段 ③ 第三方库
-
-```bash
-sudo apt-get install -y \
-  nlohmann-json3-dev \
-  libcpp-httplib-dev \
-  default-libmysqlclient-dev \
-  libssl-dev
-```
-
-#### 阶段 ④ 数据库
-
-```bash
-sudo apt-get install -y \
-  mysql-server \
-  mysql-client            # run_tests.sh 执行 §3.4 断言 SQL 需要
-
-sudo mysqld --initialize-insecure --user=mysql
-sudo mysqld_safe &
-
-# 1967MB 机器必须调低，否则会与 judge 抢内存、成为 OOM killer 首选目标
-sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"
-
-# 建库建号（表由应用启动时幂等创建，见 §2.1-A 第 1 条）
-sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
-                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
-                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
-```
-
-#### 一键版（四个阶段合并，空白系统可直接粘贴）
-
-```bash
-sudo apt-get update && sudo apt-get install -y \
-  ca-certificates curl git \
-  g++-12 gcc-12 make libc6-dev \
-  nlohmann-json3-dev libcpp-httplib-dev \
-  default-libmysqlclient-dev libssl-dev \
-  mysql-server mysql-client
-
-sudo mysqld --initialize-insecure --user=mysql && sudo mysqld_safe &
-sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"
-sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
-                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
-                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
-```
-
-装完执行 **A.6 的 7 项验证**，任一不符立即停下排查，**不要继续往下做**。
-
-### A.2 下载前端三库（vendored）
-
-> ⚠️ **必须用 `/npm/` 路径** —— 实测 `/gh/` 对 `codemirror.min.js` 与 `marked.min.js` 返回 404。
-
-```bash
-V=5.65.16
-B=https://cdn.jsdelivr.net/npm
-mkdir -p static/vendor/cm/{mode/clike,addon/edit,addon/comment} \
-         static/vendor/LICENSES
-
-curl -sSL -o static/vendor/cm/codemirror.min.js                 $B/codemirror@$V/lib/codemirror.min.js
-curl -sSL -o static/vendor/cm/mode/clike/clike.min.js          $B/codemirror@$V/mode/clike/clike.min.js
-curl -sSL -o static/vendor/cm/addon/edit/matchbrackets.min.js  $B/codemirror@$V/addon/edit/matchbrackets.min.js
-curl -sSL -o static/vendor/cm/addon/edit/closebrackets.min.js  $B/codemirror@$V/addon/edit/closebrackets.min.js
-curl -sSL -o static/vendor/cm/addon/comment/comment.min.js      $B/codemirror@$V/addon/comment/comment.min.js
-curl -sSL -o static/vendor/marked.min.js                        $B/marked@12.0.2/marked.min.js
-curl -sSL -o static/vendor/purify.min.js                        $B/DOMPurify@3.1.6/dist/purify.min.js
-
-# 完整性自检：7 个文件全部 > 1KB。404 响应体只有 50~90 字节，会被这条抓住
-find static/vendor -name '*.js' -size -1k -print     # 应无任何输出
-ls -la static/vendor/cm static/vendor/*.js
-```
-
-**MIT LICENSE**（vendored 进产物必须保留原始声明，从各库仓库的 `LICENSE` 文件取得）：
-
-| 库 | LICENSE |
-|---|---|
-| CodeMirror 5 | MIT |
-| Marked 12 | MIT |
-| DOMPurify 3 | Apache-2.0 **或** MulanPSL-2.0（双许可，取其一即可） |
-
-### A.3 配置文件 `.env`
-
-MySQL 的初始化已在 **A.1 阶段 ④** 完成，此处只列应用配置。
-
-`OJ_ADMIN_USERNAMES` 是 `users.role` 的**唯一真源**（见 §6.3.1）：
-
-```bash
-OJ_ALLOW_REGISTER=1
-OJ_ADMIN_USERNAMES=alise        # ⚠️ 必须是已存在的用户名，否则启动时 WARN 且不会建出 admin
-MYSQL_HOST=127.0.0.1
-MYSQL_PORT=3306
-MYSQL_USER=oj
-MYSQL_PASSWORD=oj
-MYSQL_DB=oj
-OJ_LISTEN=0.0.0.0:8080
-OJ_JUDGE_WORKERS=2          # [D-74] 不得与 §1.4/§2.3 的推导值不一致
-OJ_JUDGE_GATE=4             # [D-74] 必须 = 2 × workers
-OJ_FENCE_MULTIPLIER=10      # [D-62] §5.4.2.1 的 ×10，改闸门前必须重算
-```
-
-> **三个参数是一条链**：`OJ_JUDGE_GATE` → `OJ_FENCE_MULTIPLIER` 的余量（§5.4.2.1）→ AC-38 的压测口径。改任一个都要重算另两个。
-
-### A.4 可选：路线 B（Docker）
-
-```bash
-sudo usermod -aG docker $USER     # ⚠️ 必须注销并重新登录才生效
-# 重新登录后验证：
-docker info >/dev/null && echo "docker 可用" || echo "仍未生效，检查是否已重新登录"
-```
-
-### A.5 镜像可达性备忘
-
-| 用途 | 可用地址 |
-|---|---|
-| 前端三库 | `https://cdn.jsdelivr.net/npm/<pkg>@<ver>/...` |
-| apt | `http://mirrors.tencentyun.com/ubuntu/`、`http://archive.ubuntu.com/ubuntu/` |
-| git remote | `git@gitee.com:Zhang--LinLing/cpp-oj-vibcoding.git`（SSH，已验证） |
-| ❌ 不可用 | `github.com`、`raw.githubusercontent.com`、`cdn.jsdelivr.net/gh/...` |
-
-### A.6 装完验证（7 项 · 任一不符立即停下排查）
-
-```bash
-# ① 编译器是 12（不是宿主默认的 13）
-g++-12 --version | head -1
-
-# ② judge 依赖的 POSIX 头文件齐全
-for h in sys/resource.h sys/wait.h sys/prctl.h unistd.h; do
-  printf "%-18s " "$h"; [ -f /usr/include/$h ] && echo '✓' || echo '✗ 缺 libc6-dev'
-done
-
-# ③ 第三方库头文件路径与 §6.7.2 一致
-dpkg -L libcpp-httplib-dev | grep httplib.h      # 期望 /usr/include/httplib.h
-ls /usr/include/nlohmann/json.hpp
-ls /usr/include/mysql/mysql.h
-ls /usr/include/openssl/blowfish.h
-
-# ④ 前端 7 个文件全部下载成功（404 响应体只有 50~90 字节，会被 -size -1k 抓住）
-find static/vendor -name '*.js' -size -1k -print | wc -l    # 期望 0
-ls static/vendor/cm/mode/clike/clike.min.js                 # 期望存在（C++ 高亮的命门）
-
-# ⑤ MySQL 连通
-mysql -h 127.0.0.1 -uoj -poj oj -e "SELECT VERSION();"
-
-# ⑥ HTTPS 下载能力（验证阶段 ① 的 ca-certificates 真的装好了）
-curl -sS -o /dev/null -w "%{http_code}\n" \
-  https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js  # 期望 200
-
-# ⑦ judge 的地基：fork + setrlimit + prctl + wait4 能否实际跑起来（§5 的前提）
-cat > /tmp/t.cpp <<'EOF'
-#include <sys/resource.h>
-#include <sys/wait.h>
-#include <sys/prctl.h>
-#include <unistd.h>
-#include <cstdio>
-int main() {
-  pid_t p = fork();
-  if (p == 0) { prctl(PR_SET_PDEATHSIG, SIGKILL);
-    struct rlimit r{1, 2}; setrlimit(RLIMIT_CPU, &r); _exit(0); }
-  int st; struct rusage ru;
-  wait4(p, &st, 0, &ru);
-  printf("ok cpu=%ld.%06ld\n", (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec);
-}
-EOF
-g++-12 -std=c++17 /tmp/t.cpp -o /tmp/t && /tmp/t
-```
-
-> **第 ⑦ 项为什么不能省**：它是 §5 判题流水线全部机制的最小验证点（`fork` + `setpgid` 同族 + `setrlimit` + `wait4` 取 rusage + `prctl` 防父进程死了子进程残留）。若这一项失败（头文件缺、或某个 syscall 被 seccomp 拦了），**后面 T2.3 / T2.4 全部白写**。`RLIMIT_CPU = 1` 软限 + `2` 硬限，配上 `prctl(PR_SET_PDEATHSIG)`，对应 §5.4 的资源限制与 R-4 的资源泄漏防护。
