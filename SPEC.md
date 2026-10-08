@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.6（环境落地：路线 A 原生构建 / vendored 前端 / 资源下调） |
+| 版本 | v1.7（依赖清单补全为空白系统口径：补 4 项必需 / 移除 3 项不需要） |
 | 日期 | 2026-10-02 |
 | 状态 | 规格已确认，进入实施 |
 | 交付周期 | 3 周 |
@@ -85,6 +85,19 @@
 > 附带两处按实测环境做的选型调整：`D-72`（cpp-httplib 锁 apt 版）与 `D-74`（worker/闸门按实测资源下调）。完整清单见 **§6.7**，一键脚本见 **附录 A**。
 >
 > **这一轮的取向**：环境问题**不回头改架构**。DDL、判题流水线、API 契约、错误码**全部零变更** —— 路线 A 与路线 B 的差别只在"谁负责拉起 mysqld 与 g++"，不触及任何业务逻辑。
+>
+> **v1.7 是对 v1.6 依赖清单的补正**（不新增决策）。起因是把 §6.7.2/附录 A 的清单放到"空白 Ubuntu 24.04"上逐条走了一遍，发现 v1.6 隐含假设了一台**已配置的机器**：
+>
+> | 缺口 | 后果 | v1.7 处置 |
+> |---|---|---|
+> | 未列 `ca-certificates` | 阶段 ④ 的 `curl -sSL` 失败，报错像"证书过期" | 补为阶段 ① 必需 |
+> | 未列 `curl` / `git` | 空白系统上根本没有下载器与版本库 | 补为阶段 ① 必需 |
+> | 未列 `mysql-client` | `run_tests.sh` 跑不了 §3.4 的断言 SQL | 补为阶段 ④ 必需 |
+> | 未显式列 `libc6-dev` | judge 的 `getrusage`/`wait4`/`prctl` 头文件靠它（虽由 `g++-12` 传递带入） | 显式列出并说明传递链 |
+> | 列了 `cmake`/`pkg-config` | 与 T0.1 已定的 Makefile 并存，徒增困惑 | 移入「⛔ 不装」并写明理由 |
+> | 建议过 `build-essential` | 会连带装 g++-13，与 D-13 冲突 | 移入「⛔ 不装」 |
+>
+> **净变化：+5 必需项、−3 不需要项，决策数不变（仍 75 项），DDL 与架构零变更。** 另新增 **A.6 的 7 项装完验证**，其中第 ⑦ 项（fork+setrlimit+prctl+wait4）是 §5 判题机制的最小验证点。
 
 ---
 
@@ -1871,18 +1884,23 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 
 #### 6.7.1 实测环境现状
 
+**§6.7.2 的依赖清单按「空白 Ubuntu 24.04」口径给出**（即全部需要安装）。下表是本项目**实际开发机**的现状，两者差异即"已配置"与"空白"的差距 —— 空白机器上第 1 行标 ❌ 的项都需要装。
+
 | 项 | SPEC 目标 | 实测 | 结论 |
 |---|---|---|---|
 | 系统 | Ubuntu 24.04 | 24.04.4 LTS (noble)，内核 6.8.0 | ✅ |
 | CPU | 2 核 | **2 核** | ✅ 刚好够 `worker 2 × 闸门 4` |
-| 内存 | 4G | **1967MB**（可用 426MB） | ⚠️ 触发 §1.4 的双档与 `D-73` 下调 |
+| 内存 | 4G | **1967MB**（可用 426MB） | ⚠️ 触发 §1.4 的双档与 `D-74` 下调 |
 | 磁盘 | — | 50G 中 31G 可用（`/tmp` 为 judge 工作区） | ✅ |
 | 编译器 | g++ 12 / C++17 | 宿主默认 **g++ 13.3.0** | 需装 `g++-12` 显式对齐（D-13） |
 | 权限 | 装包需 root | **uid=1002，无免密 sudo** | 装包需交互输入密码 |
 | Docker | 双容器（路线 B） | 已装 29.6.1，但**用户不在 `docker` 组** | `permission denied on /var/run/docker.sock` → 走路线 A |
 | MySQL 服务端 | — | `mysqld` **已存在** 8.0.46 | 路线 A 可直接初始化，无需容器 |
-| 构建工具 | — | `make` 4.3 ✅ / `cmake` ❌ / `pkg-config` ❌ | 需补装后两者 |
-| 前端工具链 | — | node 24.21 / npm 11.19 / python3 3.12 ✅ | 装包用 `apt`，**不需要 node** |
+| `curl` / `git` / `make` | — | ✅ 已装 | — |
+| `ca-certificates` | — | ✅ 已装 | **空白系统必装**，缺失时报错像"证书过期" |
+| `cmake` / `pkg-config` | — | ❌ 未装 | **本就不需要**（§6.7.2 的 ⛔ 行） |
+| 四第三方库头文件 | §6.7.2 | ❌ 全缺 | 需 `sudo apt-get install` |
+| 前端工具链 | — | node 24.21 / npm 11.19 / python3 3.12 ✅ | **装包用 apt，不需要 node** |
 
 **网络可达性实测**（决定下载源）：
 
@@ -1897,19 +1915,31 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 
 #### 6.7.2 服务端包依赖（apt，noble 实测版本）
 
-| 用途 | 包 | 版本 | 头文件路径 | 必需 |
-|---|---|---|---|---|
-| C++ 编译器 | `g++-12` `gcc-12` | 12.4.0 | — | ✅ |
-| 构建 | `make` | 4.3 | — | ✅ |
-| 构建 | `cmake` | 3.28.3 | — | 可选 |
-| 构建 | `pkg-config` | 1.8.1 | — | 建议 |
-| JSON | `nlohmann-json3-dev` | 3.11.3 | `/usr/include/nlohmann/json.hpp` | ✅ |
-| HTTP | `libcpp-httplib-dev` | **0.14.3** | `/usr/include/httplib.h` | ✅ |
-| DB 客户端 | `default-libmysqlclient-dev` | 8.0.46 | `/usr/include/mysql/mysql.h` | ✅ |
-| 密码哈希 | `libssl-dev` | 3.0.13 | `/usr/include/openssl/{evp,blowfish}.h` | ✅ |
-| DB 服务端 | `mysql-server` | 8.0.46 | — | 路线 A |
-| ~~bcrypt~~ | ❌ | — | — | 见 §6.2.1 |
+按**空白的 Ubuntu 24.04** 口径列出 —— 即除系统自带的基础设施外全部需要安装。分组对应附录 A 的四个阶段。
 
+| 阶段 | 用途 | 包 | 版本 | 头文件路径 | 必需 |
+|---|---|---|---|---|---|
+| **① 引导** | HTTPS 根证书 | `ca-certificates` | 20260601 | — | ✅ **空白系统必需** |
+| | 下载器 | `curl` | 8.5.0 | — | ✅ 前端库下载 + `run_tests.sh` |
+| | 版本库 | `git` | 2.43.0 | — | ✅ 拉本仓库 |
+| **② 工具链** | C++ 编译器 | `g++-12` `gcc-12` | 12.4.0 | — | ✅ D-13 |
+| | 构建入口 | `make` | 4.3 | — | ✅ T0.1 的 Makefile |
+| | POSIX 头文件 | `libc6-dev` | 2.39 | `/usr/include/sys/{resource,wait,prctl}.h`、`unistd.h` | ✅ **显式列出**（见下方注） |
+| **③ 第三方库** | JSON | `nlohmann-json3-dev` | 3.11.3 | `/usr/include/nlohmann/json.hpp` | ✅ |
+| | HTTP | `libcpp-httplib-dev` | **0.14.3** | `/usr/include/httplib.h` | ✅ D-72 |
+| | DB 客户端 | `default-libmysqlclient-dev` | 8.0.46 | `/usr/include/mysql/mysql.h` | ✅ |
+| | 密码哈希 | `libssl-dev` | 3.0.13 | `/usr/include/openssl/{evp,blowfish}.h` | ✅ D-75 |
+| **④ 数据库** | DB 服务端 | `mysql-server` | 8.0.46 | — | ✅ 路线 A |
+| | DB 客户端 | `mysql-client` | 8.0.46 | — | ✅ **`run_tests.sh` 需要**（§3.4 断言 SQL） |
+| **⛔ 不装** | — | ~~`cmake`~~ | — | — | ❌ T0.1 已定 Makefile，两个构建系统并存只会让人不知用哪个 |
+| | — | ~~`pkg-config`~~ | — | — | ❌ 四个库路径固定，Makefile 直接写 `-lmysqlclient -lssl -lcrypto` |
+| | — | ~~`build-essential`~~ | — | — | ❌ 它会连带装 g++-13，与 D-13「锁 g++-12」相悖 |
+| | — | ~~`libbcrypt-dev`~~ | ❌ | — | ❌ 24.04 官方源无此包，见 §6.2.1 |
+
+> **为什么 `libc6-dev` 要显式列出**（尽管它由 `g++-12` 传递带入）：传递链是 `g++-12 → libstdc++-12-dev → libc6-dev`，实测确认存在，所以**不装也能编过**。但生成的 `tester.cpp` / `tester_util.h` 要用 `getrusage`（`<sys/resource.h>`）、`wait4`（`<sys/wait.h>`）、`prctl`（`<sys/prctl.h>`）、`fork`/`chdir`（`<unistd.h>`）—— **全部来自这个包**。显式列出是为了防止将来更换编译链时在某个机器上突然缺头文件。
+>
+> **`ca-certificates` 为什么列为必需**：缺它时 `curl -sSL https://...` 报的错是 `SSL certificate problem: unable to get local issuer certificate`，**看起来像证书过期而非缺包**，排查成本高。空白系统必装。
+>
 > **`libcpp-httplib-dev` 的文件布局**（实测 Ubuntu 包清单）：只含一个文件 **`/usr/include/httplib.h`**，**不是** `/usr/include/cpp-httplib/httplib.h`。因此：
 >
 > ```cpp
@@ -2312,10 +2342,10 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 ### M0 — 地基（Day 1–2）
 
-- [ ] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **附录 A** 的一键脚本 + §6.7.4 的下载命令
-  - 确认 `dpkg -L libcpp-httplib-dev | grep httplib.h` 返回 `/usr/include/httplib.h`（§6.7.2）
-  - 确认 `static/vendor` 下 7 个 js 文件**全部 > 1KB**（`find static/vendor -name '*.js' -size -1k` 应无输出）
-  - 初始化并启动本机 `mysqld`，**把 `innodb_buffer_pool_size` 设为 64MB**（1967MB 机器上不调会与 judge 抢内存，见 §2.1-A 第 3 条）
+- [ ] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **附录 A.1 四阶段** + **A.2** 的下载命令 + **A.6** 的 7 项验证
+  - **7 项验证必须全绿才继续**，尤其第 ⑦ 项（fork+setrlimit+prctl+wait4）—— 它失败意味着 §5 全部机制不可用
+  - 初始化本机 `mysqld`，**把 `innodb_buffer_pool_size` 设为 64MB**（1967MB 机器上不调会与 judge 抢内存，见 §2.1-A 第 3 条）
+  - 装 **不要** `cmake` / `pkg-config` / `build-essential`（§6.7.2 的 ⛔ 行，理由见该节）
 - [ ] T0.1 目录骨架 + **`Makefile`（路线 A 主入口）** `[D-71]`
   - `make build` / `make run` / `make test` / `make clean`
   - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `./oj`
@@ -2748,34 +2778,88 @@ V-3  验证 §5.3（stdout/stderr 分流是否可靠）
 >
 > **唯一一处跨章节的定量约束**（也是本轮最容易被漏掉的）：**§1.4 的闸门 4 → §2.3 的 worker 2 → §5.4.2.1 的兜底墙钟余量 2.9 倍 → §10.1 的 AC-38 四并发压测**。这四个数字是一条链，动一个必须重算另外三个 —— 这正是 §8.1.1 说的"交叉一致性"问题，环境轮把它又演示了一遍。
 
+**v1.7 的联动面**（**不新增决策，仍 75 项**）：纯依赖清单的事实性补正。改动仅 **§0（+v1.7 补正说明）/ §6.7.1（区分"空白"与"已配置"）/ §6.7.2（按四阶段分组、+5 必需项、−3 不需要项）/ 附录 A（A.1 拆四阶段+A.2+A.3+A.6，新增 A.6 的 7 项验证）/ §9 T0.0（改为指向 A.6）**。
+
+> **v1.7 刻意没动的四处**：① **决策表** —— 这轮是"清单对不上现实"，不是"需要做新选择"，不占决策号；② **§3.2 DDL** —— 依赖装法与持久化形态无关；③ **§2.1-A/B 两张图** —— 路线划分不变，只是不再假设机器已配好；④ **附录 A.4/A.5**（Docker 与镜像备忘）—— 路线 B 仍为可选，内容不受影响。
+
 ---
 
 ## 附录 A：环境安装与下载（Ubuntu 24.04 / 路线 A）
 
-对应 §6.7。本附录是**可直接复制执行**的操作手册。
+对应 §6.7。**§6.7.2 的依赖清单与本附录均按「空白 Ubuntu 24.04」口径**。执行顺序：**A.1（四阶段）→ A.2（下载前端库）→ A.3（配置 .env）→ A.6（7 项验证）**，全部通过后再 `make build`。A.4 / A.5 为补充参考。
 
-### A.1 一键安装服务端依赖
+### A.1 安装（空白 Ubuntu 24.04 · 四阶段）
+
+依赖清单见 §6.7.2。**四个阶段有先后依赖**（① 提供下载器与证书，② 才能编译，④ 要等②③就绪才能连库），不要跳着执行。
+
+#### 阶段 ① 引导层
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  ca-certificates \      # 缺它 curl -sSL 会报 SSL certificate problem（像证书过期，不像缺包）
+  curl \                 # 下载前端库 + run_tests.sh 调 API
+  git                    # 拉本仓库
+```
+
+#### 阶段 ② 编译工具链
+
+```bash
+sudo apt-get install -y \
+  g++-12 gcc-12 \
+  make \
+  libc6-dev              # judge 的 getrusage / wait4 / prctl / fork 头文件来自这里
+```
+
+> **不要装** `build-essential`（会连带装 g++-13，与 D-13 冲突）；`cmake` / `pkg-config` 本项目用不到（§6.7.2）。
+
+#### 阶段 ③ 第三方库
+
+```bash
+sudo apt-get install -y \
+  nlohmann-json3-dev \
+  libcpp-httplib-dev \
+  default-libmysqlclient-dev \
+  libssl-dev
+```
+
+#### 阶段 ④ 数据库
+
+```bash
+sudo apt-get install -y \
+  mysql-server \
+  mysql-client            # run_tests.sh 执行 §3.4 断言 SQL 需要
+
+sudo mysqld --initialize-insecure --user=mysql
+sudo mysqld_safe &
+
+# 1967MB 机器必须调低，否则会与 judge 抢内存、成为 OOM killer 首选目标
+sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"
+
+# 建库建号（表由应用启动时幂等创建，见 §2.1-A 第 1 条）
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
+                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
+                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
+```
+
+#### 一键版（四个阶段合并，空白系统可直接粘贴）
 
 ```bash
 sudo apt-get update && sudo apt-get install -y \
-  g++-12 gcc-12 make cmake pkg-config \
+  ca-certificates curl git \
+  g++-12 gcc-12 make libc6-dev \
   nlohmann-json3-dev libcpp-httplib-dev \
   default-libmysqlclient-dev libssl-dev \
-  mysql-server
+  mysql-server mysql-client
+
+sudo mysqld --initialize-insecure --user=mysql && sudo mysqld_safe &
+sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
+                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
+                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
 ```
 
-装完先验证三件事（任一不符立即停下排查）：
-
-```bash
-# ① cpp-httplib 头文件在 /usr/include/httplib.h（不是 cpp-httplib/ 子目录）
-dpkg -L libcpp-httplib-dev | grep httplib.h
-
-# ② 编译器是 12 而非宿主默认的 13
-g++-12 --version | head -1
-
-# ③ 密码哈希可用的 Blowfish 头文件
-ls /usr/include/openssl/blowfish.h
-```
+装完执行 **A.6 的 7 项验证**，任一不符立即停下排查，**不要继续往下做**。
 
 ### A.2 下载前端三库（vendored）
 
@@ -2808,26 +2892,15 @@ ls -la static/vendor/cm static/vendor/*.js
 | Marked 12 | MIT |
 | DOMPurify 3 | Apache-2.0 **或** MulanPSL-2.0（双许可，取其一即可） |
 
-### A.3 初始化本机 MySQL（路线 A）
+### A.3 配置文件 `.env`
 
-```bash
-sudo mysqld --initialize-insecure --user=mysql
-sudo mysqld_safe &
+MySQL 的初始化已在 **A.1 阶段 ④** 完成，此处只列应用配置。
 
-# 1967MB 机器必须调低 buffer pool，否则会与 judge 抢内存被 OOM killer 优先杀
-sudo mysql -e "SET GLOBAL innodb_buffer_pool_size = 67108864;"   # 64MB
-
-# 建库与账号（应用启动时会幂等建表，§2.1-A）
-sudo mysql -e "CREATE DATABASE IF NOT EXISTS oj DEFAULT CHARSET utf8mb4;
-                CREATE USER IF NOT EXISTS 'oj'@'127.0.0.1' IDENTIFIED BY 'oj';
-                GRANT ALL ON oj.* TO 'oj'@'127.0.0.1'; FLUSH PRIVILEGES;"
-```
-
-`.env`（`OJ_ADMIN_USERNAMES` 是 `users.role` 的唯一真源，见 §6.3.1）：
+`OJ_ADMIN_USERNAMES` 是 `users.role` 的**唯一真源**（见 §6.3.1）：
 
 ```bash
 OJ_ALLOW_REGISTER=1
-OJ_ADMIN_USERNAMES=alise
+OJ_ADMIN_USERNAMES=alise        # ⚠️ 必须是已存在的用户名，否则启动时 WARN 且不会建出 admin
 MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 MYSQL_USER=oj
@@ -2835,9 +2908,11 @@ MYSQL_PASSWORD=oj
 MYSQL_DB=oj
 OJ_LISTEN=0.0.0.0:8080
 OJ_JUDGE_WORKERS=2          # [D-74] 不得与 §1.4/§2.3 的推导值不一致
-OJ_JUDGE_GATE=4             # [D-74] = 2 × workers
+OJ_JUDGE_GATE=4             # [D-74] 必须 = 2 × workers
 OJ_FENCE_MULTIPLIER=10      # [D-62] §5.4.2.1 的 ×10，改闸门前必须重算
 ```
+
+> **三个参数是一条链**：`OJ_JUDGE_GATE` → `OJ_FENCE_MULTIPLIER` 的余量（§5.4.2.1）→ AC-38 的压测口径。改任一个都要重算另两个。
 
 ### A.4 可选：路线 B（Docker）
 
@@ -2855,3 +2930,52 @@ docker info >/dev/null && echo "docker 可用" || echo "仍未生效，检查是
 | apt | `http://mirrors.tencentyun.com/ubuntu/`、`http://archive.ubuntu.com/ubuntu/` |
 | git remote | `git@gitee.com:Zhang--LinLing/cpp-oj-vibcoding.git`（SSH，已验证） |
 | ❌ 不可用 | `github.com`、`raw.githubusercontent.com`、`cdn.jsdelivr.net/gh/...` |
+
+### A.6 装完验证（7 项 · 任一不符立即停下排查）
+
+```bash
+# ① 编译器是 12（不是宿主默认的 13）
+g++-12 --version | head -1
+
+# ② judge 依赖的 POSIX 头文件齐全
+for h in sys/resource.h sys/wait.h sys/prctl.h unistd.h; do
+  printf "%-18s " "$h"; [ -f /usr/include/$h ] && echo '✓' || echo '✗ 缺 libc6-dev'
+done
+
+# ③ 第三方库头文件路径与 §6.7.2 一致
+dpkg -L libcpp-httplib-dev | grep httplib.h      # 期望 /usr/include/httplib.h
+ls /usr/include/nlohmann/json.hpp
+ls /usr/include/mysql/mysql.h
+ls /usr/include/openssl/blowfish.h
+
+# ④ 前端 7 个文件全部下载成功（404 响应体只有 50~90 字节，会被 -size -1k 抓住）
+find static/vendor -name '*.js' -size -1k -print | wc -l    # 期望 0
+ls static/vendor/cm/mode/clike/clike.min.js                 # 期望存在（C++ 高亮的命门）
+
+# ⑤ MySQL 连通
+mysql -h 127.0.0.1 -uoj -poj oj -e "SELECT VERSION();"
+
+# ⑥ HTTPS 下载能力（验证阶段 ① 的 ca-certificates 真的装好了）
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js  # 期望 200
+
+# ⑦ judge 的地基：fork + setrlimit + prctl + wait4 能否实际跑起来（§5 的前提）
+cat > /tmp/t.cpp <<'EOF'
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <unistd.h>
+#include <cstdio>
+int main() {
+  pid_t p = fork();
+  if (p == 0) { prctl(PR_SET_PDEATHSIG, SIGKILL);
+    struct rlimit r{1, 2}; setrlimit(RLIMIT_CPU, &r); _exit(0); }
+  int st; struct rusage ru;
+  wait4(p, &st, 0, &ru);
+  printf("ok cpu=%ld.%06ld\n", (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec);
+}
+EOF
+g++-12 -std=c++17 /tmp/t.cpp -o /tmp/t && /tmp/t
+```
+
+> **第 ⑦ 项为什么不能省**：它是 §5 判题流水线全部机制的最小验证点（`fork` + `setpgid` 同族 + `setrlimit` + `wait4` 取 rusage + `prctl` 防父进程死了子进程残留）。若这一项失败（头文件缺、或某个 syscall 被 seccomp 拦了），**后面 T2.3 / T2.4 全部白写**。`RLIMIT_CPU = 1` 软限 + `2` 硬限，配上 `prctl(PR_SET_PDEATHSIG)`，对应 §5.4 的资源限制与 R-4 的资源泄漏防护。
