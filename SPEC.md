@@ -2297,11 +2297,11 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 ### M0 — 地基（Day 1–2）
 
-- [ ] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **§6.7.2 的全部命令** + **§6.7.4 的 6 项验证**
+- [√] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **§6.7.2 的全部命令** + **§6.7.4 的 6 项验证**
   - **7 项验证必须全绿才继续**，尤其第 ⑦ 项（fork+setrlimit+prctl+wait4）—— 它失败意味着 §5 全部机制不可用
   - 初始化本机 `mysqld`，**把 `innodb_buffer_pool_size` 设为 64MB**（1967MB 机器上不调会与 judge 抢内存，见 §2.1-A 第 3 条）
   - 装 **不要** `cmake` / `pkg-config` / `build-essential`（§6.7.1 的「明确不装」行，理由见该节）
-- [ ] T0.1 目录骨架 + **`Makefile`（路线 A 主入口）** `[D-71]`
+- [√] T0.1 目录骨架 + **`Makefile`（路线 A 主入口）** `[D-71]`
   - `make build` / `make run` / `make test` / `make clean`
   - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `./oj`
   - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
