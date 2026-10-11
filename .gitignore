@@ -1,0 +1,9 @@
+# 构建产物（tests/run_unit_tests.sh 的输出目录）
+build/
+
+# 运行日志：目录本身保留，内容忽略（SPEC §2.1-A 注 2 —— 不用 volume，直接是仓库内目录）
+logs/*.log
+
+# .env 是本地配置，本项目的密码是开发用的明文默认值（dependence.md §4），
+# 若将来换成真实口令，请取消下一行注释
+#.env

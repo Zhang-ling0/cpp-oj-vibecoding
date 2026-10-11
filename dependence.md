@@ -1,6 +1,6 @@
 # dependence.md — CppOJ 开发环境依赖
 
-Ubuntu 24.04 (noble) · amd64 · 对应 SPEC v1.7 §6.7
+Ubuntu 24.04 (noble) · amd64 · 对应 SPEC v1.9 §6.7
 
 ---
 
@@ -9,28 +9,59 @@ Ubuntu 24.04 (noble) · amd64 · 对应 SPEC v1.7 §6.7
 ```bash
 sudo apt-get update && sudo apt-get install -y \
   ca-certificates curl git \
-  g++-12 gcc-12 make libc6-dev \
-  nlohmann-json3-dev libcpp-httplib-dev libmysqlclient-dev libssl-dev \
+  g++-12 gcc-12 make cmake libc6-dev \
+  nlohmann-json3-dev libmysqlclient-dev libssl-dev \
+  libgtest-dev \
   mysql-server mysql-client
+
+# ---------- cpp-httplib：header-only 单文件，不走 apt ----------
+# 装 0.60.1（[D-72] v1.9 修订的真源）。本机已装好，重装机器时执行这一行即可。
+curl -sSL -o /tmp/httplib.h \
+  https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.60.1/httplib.h
+sudo install -m 644 /tmp/httplib.h /usr/local/include/httplib.h
+grep -m1 CPPHTTPLIB_VERSION /usr/local/include/httplib.h   # 应为 "0.60.1"
 ```
 
 | 用途 | 包 |
 |---|---|
 | 引导 | `ca-certificates`（HTTPS 根证书）`curl`（下载器）`git`（版本库） |
-| 工具链 | `g++-12` `gcc-12`（判题编译器，锁定 12）`make`（构建入口）`libc6-dev`（POSIX 头文件） |
-| 第三方库 | `nlohmann-json3-dev`（JSON）`libcpp-httplib-dev`（HTTP）`libmysqlclient-dev`（MySQL）`libssl-dev`（密码哈希 Blowfish） |
+| 工具链 | `g++-12` `gcc-12`（判题编译器，锁定 12）`cmake`（**v1.8 起的唯一构建入口**）`make`（`make build/run/test/clean` 那层入口）`libc6-dev`（POSIX 头文件） |
+| 第三方库 | `nlohmann-json3-dev`（JSON）`libmysqlclient-dev`（MySQL）`libssl-dev`（密码哈希 Blowfish） |
+| HTTP | **httplib.h 0.60.1（自装单头文件，`/usr/local/include/`）** `[v1.9]` |
+| 测试 | `libgtest-dev`（gtest 1.14，自带 `GTestConfig.cmake`，`ctest` 直接可用） |
 | 数据库 | `mysql-server` `mysql-client`（验收脚本跑 SQL 用） |
 
 **明确不装**：
 
 | 包 | 原因 |
 |---|---|
-| `cmake` | 构建系统已定为 `Makefile`，两个并存只会让人不知用哪个 |
-| `pkg-config` | 四个库的头文件/库文件路径都固定，Makefile 直接写 `-lmysqlclient -lssl -lcrypto` |
-| `build-essential` | 会连带装 **g++-13**，与"判题编译器锁 g++-12"冲突 |
+| `pkg-config` | 四个库的头文件/库文件路径都固定，CMake 用 `find_package` / `find_path` 直接找 |
+| `build-essential` | 会连带装 **g++-13**，与"判题编译器锁 g++-12"冲突（24.04 的默认 `g++` 就是 13） |
 | `libbcrypt-dev` | **24.04 官方源无此包**（`apt-cache search bcrypt` 无结果）。密码哈希改用 OpenSSL Blowfish 自行实现（SPEC §6.2.1） |
+| **`libcpp-httplib-dev`** | **v1.9**：本机用的是自装的 0.60.1；误装 apt 的 0.14.3 会让 `find_path` 命中 `/usr/include` 而静默用旧版 —— 版本漂移正是 `[D-72]` 想消除的东西 |
 
 > `libc6-dev` 虽由 `g++-12 → libstdc++-12-dev → libc6-dev` 传递带入，仍建议显式安装 —— judge 用到的 `getrusage`(`<sys/resource.h>`)、`wait4`(`<sys/wait.h>`)、`prctl`(`<sys/prctl.h>`) 头文件全来自它。
+
+> **`cmake` 曾被列进「不装」**（v1.7 的理由是"与 Makefile 并存只会让人不知用哪个"）。v1.8 起 `CMakeLists.txt` 是唯一构建规则、`Makefile` 只剩 15 行转发，那条顾虑不存在，于是移回必需。
+
+## 1.1 构建与测试（v1.8）
+
+```bash
+make build        # == cmake -S . -B build -DCMAKE_CXX_COMPILER=g++-12 && cmake --build build -j
+make test         # == ctest --test-dir build --output-on-failure
+make test ARGS='-R Admin'    # 只跑名字匹配的用例
+make run          # 拉起 mysqld（若未运行）后启动 build/oj
+make clean
+```
+
+| 依赖 | CMake 怎么找 | 缺了 / 变了会怎样 |
+|---|---|---|
+| Threads / OpenSSL / nlohmann_json / GTest | `find_package`（apt 包都自带 CONFIG） | 配置阶段 `FATAL_ERROR` |
+| MySQL C Connector | `find_path(mysql/mysql.h)` + `find_library(mysqlclient)` | 仅 `WARNING`，等 `dao.cpp` 真的 `#include <mysql/mysql.h>` 才失败 |
+| cpp-httplib 0.60.1 | `find_path(httplib.h)` → 命中 `/usr/local/include` | configure 打印**路径 + 版本**；版本 ≠ 0.60.1 时 `WARNING` 点名 |
+| cpp-httplib 兜底 | 上一条没命中 → 用 `third_party/httplib`（**0.14.3**） | `WARNING` 提示"版本不一致，视为环境未就绪"；两者都没有才 `FATAL_ERROR` |
+
+> **`[D-72]` v1.9 的口径**：httplib 真源是本机 `/usr/local/include/httplib.h` **0.60.1**，不是 apt 的 0.14.3（实测 apt 包从未安装）。头文件是 header-only 单文件，"安装"= 放一个文件，无需编译链接。仓库内 `third_party/httplib/httplib.h`（0.14.3）**只作为环境缺失时的兜底**，不再是版本真源。路线 B 的镜像必须自带同一份 0.60.1。
 
 ---
 
@@ -160,16 +191,20 @@ OJ_FENCE_MULTIPLIER=10
 
 ---
 
-## 5. 验证（6 项，全绿再继续）
+## 5. 验证（7 项，全绿再继续）
 
 ```bash
 g++-12 --version | head -1                             # 应为 12.x
-dpkg -L libcpp-httplib-dev | grep httplib.h           # 应为 /usr/include/httplib.h
+cmake --version | head -1                              # 应为 ≥ 3.20（实测 3.28.3）
+ls /usr/include/gtest/gtest.h                          # 单测依赖
+grep -m1 CPPHTTPLIB_VERSION /usr/local/include/httplib.h   # 应为 "0.60.1"（不是 apt 的 0.14.3）
 ls /usr/include/{nlohmann/json.hpp,mysql/mysql.h,openssl/blowfish.h}
 ls /usr/include/sys/{resource.h,wait.h,prctl.h}       # judge 依赖的 POSIX 头文件
 find static/vendor -name '*.js' -size -1k | wc -l      # 应为 0
 mysql -h 127.0.0.1 -uoj -poj oj -e "SELECT VERSION();"
 ```
+
+构建自检：`make build && make test` —— 应产出 `build/oj`，ctest 全绿（当前 44 条 config 单测）。
 
 ---
 

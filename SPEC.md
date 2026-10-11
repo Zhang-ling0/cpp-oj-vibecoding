@@ -2,8 +2,8 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.7（依赖清单补全为空白系统口径：补 4 项必需 / 移除 3 项不需要） |
-| 日期 | 2026-10-02 |
+| 版本 | v1.9（httplib 版本对齐：改用本机已装的 header-only 0.60.1，修订 `[D-72]`） |
+| 日期 | 2026-10-11 |
 | 状态 | 规格已确认，进入实施 |
 | 交付周期 | 3 周 |
 
@@ -57,7 +57,7 @@
 | — | — | D-70 | 注销时清理内存限流计数器 |
 | — | — | **D-71 ~ D-75（v1.6 环境落地轮）** | |
 | D-71 | 部署走**路线 A：宿主机原生构建**；Docker 降为可选目标形态 | D-73 | 前端三库 **vendored** 到 `static/vendor/`，不再运行时引 CDN |
-| D-72 | cpp-httplib 用 **apt 的 0.14.3**（`/usr/include/httplib.h`，无 `-I`） | D-74 | 按实测资源下调：**worker 2 / 全局闸门 4** |
+| D-72 | cpp-httplib 用**本机已装的 header-only 0.60.1**（`/usr/local/include/httplib.h`）`[v1.9 修订]` | D-74 | 按实测资源下调：**worker 2 / 全局闸门 4** |
 | — | — | D-75 | 密码哈希走 **OpenSSL Blowfish**（24.04 官方源无 `libbcrypt-dev`） |
 
 > **D-38 ~ D-41 的共同取向：只加数据，不加页面。** 个人主页所需的统计、分类掌握度、账户信息三类需求，数据全部已存在于 `submissions` / `users` / `problem_tags`，**因此不需要新表、不需要新列、不需要新页面** —— 只缺聚合端点与展示位。故 `§3.2` 的 DDL 在 v1.3 **完全不变**，页面总数仍为五页。
@@ -98,6 +98,39 @@
 > | 建议过 `build-essential` | 会连带装 g++-13，与 D-13 冲突 | 移入「⛔ 不装」 |
 >
 > **净变化：+5 必需项、−3 不需要项，决策数不变（仍 75 项），DDL 与架构零变更。** 另新增 **A.6 的 7 项装完验证**，其中第 ⑦ 项（fork+setrlimit+prctl+wait4）是 §5 判题机制的最小验证点。
+>
+> > **⚠️ 上面第 5 行的处置已被 v1.8 推翻**（`cmake` 回到「必装」）：见下节。
+>
+> **v1.8 是构建入口轮**（不新增决策，仍 75 项）。起因是 M0 实际开工时发现 T0.1 的 `Makefile` 一直空着，而"手写 Makefile"与"用 CMake"在本项目里并不是两种风格之争，是**同一份工作量的两种写法**：
+>
+> | 维度 | 手写 Makefile | CMake（v1.8 取此） |
+> |---|---|---|
+> | 依赖探测 | 自己写 4 个库的路径判断（httplib / nlohmann / mysqlclient / libcrypto）+ gtest | `find_package` + apt 自带的 CONFIG 包（nlohmann 3.11.3、GTest 1.14 均带） |
+> | 每加一个测试 | 改编译行 + 链接行 | 测试文件自动成为 target |
+> | 测试运行 | 自己写过滤与失败输出逻辑 | ctest 免费给 `-R` / `--gtest_shuffle` / `--output-on-failure` |
+> | 每加一个 `.cpp` | 改两处（core 源列表 + 测试链接） | 改一处 |
+>
+> **被推翻的那条理由**：v1.7 说"cmake 与 Makefile 并存只会让人不知用哪个"。v1.8 让 `CMakeLists.txt` 成为**唯一**构建规则、`Makefile` 降为 15 行转发封装（`make build/run/test/clean` 契约不变），"并存"不复存在，该理由随之作废。
+>
+> **取向：只换构建工具，不碰任何设计。** DDL、判题流水线、API 契约、错误码、线程模型**全部零变更**；`cmake` 只是从「⛔ 不装」移回「必装」。
+>
+> **v1.9 是 `[D-72]` 的修订**（不新增决策，仍 75 项）。起因是 v1.8 写 CMake 时实测到：
+>
+> ```
+> $ dpkg -l libcpp-httplib-dev      → 未安装
+> $ ls /usr/include/httplib.h       → 不存在（apt 路径是空的）
+> $ grep -m1 CPPHTTPLIB_VERSION /usr/local/include/httplib.h
+> #define CPPHTTPLIB_VERSION "0.60.1"
+> ```
+>
+> | v1.6~v1.8 的假设 | 实测 | v1.9 处置 |
+> |---|---|---|
+> | httplib 取 apt 的 **0.14.3**，锁版本是为了消除"宿主编过、容器编不过" | 本机实际在用的是**自行安装的 `/usr/local/include/httplib.h` 0.60.1**，apt 包从未安装 | 真源改为 0.60.1；`libcpp-httplib-dev` 从「必装」移入「明确不装」 |
+> | 路线 B 镜像装 apt 0.14.3 即可与宿主一致 | 宿主已不用 apt 版 | 路线 B 必须把**同一份 0.60.1 头文件**放进镜像，否则 D-72 要消除的漂移会原样复发 |
+>
+> **为什么直接改版本而不回退到 0.14.3**：header-only 单文件库装进 `/usr/local/include` 只有一行 `install`，回退反而要额外装一个 apt 包；而且 T0.5 尚未接线 httplib，**现在改口径的代价是零，等接线后再改就要动源码与镜像两处**。这正是 §0 v1.6 那句"环境问题必须在写业务代码前暴露"的又一次兑现。
+>
+> **不变的部分**：`#include <httplib.h>` 的写法不变（§6.2 尾注那条"源码零差异"继续成立），`CPPHTTPLIB_OPENSSL_SUPPORT` 继续关闭（单机 HTTP，§6.2），`third_party/httplib/httplib.h`（0.14.3）**降级为环境缺失时的兜底**，不再是版本真源。
 
 ---
 
@@ -1248,7 +1281,8 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 ```
 /home/ZL/project/cpp-oj-vibcoding/
 ├── SPEC.md
-├── Makefile                   # 路线 A 的构建与启动入口（D-71）
+├── CMakeLists.txt                # 唯一构建规则（v1.8）：依赖发现 + ojcore 静态库 + oj 可执行 + 测试开关
+├── Makefile                      # 【薄封装】只转发 cmake --build / ctest，保留 make build/run/test/clean（D-71）
 ├── .env                       # OJ_ALLOW_REGISTER / OJ_ADMIN_USERNAMES（D-37 角色的唯一真源）
 ├── .gitignore
 ├── docker-compose.yml         # 【路线 B 可选】D-71
@@ -1293,8 +1327,11 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 │       └── LICENSES/                 # 三个库的 MIT LICENSE，vendored 进产物必须附带
 ├── logs/               # 路线 A：仓库内目录；路线 B：volume 挂载点（D-71）
 └── tests/
-    ├── run_tests.sh                 # 端到端验收脚本
-    └── problems/                    # 验收用特制题目
+    ├── CMakeLists.txt              # 单测目标：GTest + gtest_discover_tests（v1.8）
+    ├── config_test.cpp             # config 模块单测（T0.4）
+    ├── run_unit_tests.sh           # 单测薄封装：转调 ctest（v1.8）
+    ├── run_tests.sh                # 端到端验收脚本（起服务 + curl + SQL，T5.3）
+    └── problems/                   # 验收用特制题目
 ```
 
 > **`overview.js` 为什么单列一个文件** `[D-38] [D-39]`：概览条（`list.html`）与掌握分布 tab（`history.html` tab2）消费的是**同一个端点的同一份数据**，AC-24 要求两者数值必然一致。把请求 + 聚合口径 + 渲染都收在这一个模块里，一致性就由"只有一份实现"保证，而不是靠约定。模块内含一个页面生命周期级的缓存，避免切 tab 或翻页时重复请求。
@@ -1309,14 +1346,18 @@ v1.4 完全没提 CSRF。结论是**不需要额外防护，但依赖是隐式�
 
 | 库 | apt 包 | 版本 | 用途 | 说明 |
 |---|---|---|---|---|
-| cpp-httplib | `libcpp-httplib-dev` | **0.14.3** `[D-72]` | HTTP 服务 | header-only，落在 `/usr/include/httplib.h`。`CPPHTTPLIB_OPENSSL_SUPPORT` 关闭（单机 HTTP） |
+| cpp-httplib | **无 apt 包**（自装单头文件） | **0.60.1** `[D-72, v1.9 修订]` | HTTP 服务 | header-only 单文件，落在 `/usr/local/include/httplib.h`（**不是** apt 的 `/usr/include`）。`CPPHTTPLIB_OPENSSL_SUPPORT` 关闭（单机 HTTP） |
 | MySQL C Connector | `libmysqlclient-dev` | 8.0.46 | 数据库 | `/usr/include/mysql/mysql.h`（`libmysqlclient-dev` 是其元包，装哪个都行） |
 | nlohmann/json | `nlohmann-json3-dev` | 3.11.3 | JSON 解析 | header-only，`/usr/include/nlohmann/json.hpp` |
 | **OpenSSL libcrypto** | `libssl-dev` | 3.0.13 | 密码哈希（Blowfish）`[D-75]` | **替代 `libbcrypt`** —— 24.04 官方源无 `libbcrypt-dev`；`/usr/include/openssl/blowfish.h` 已就位 |
 | ~~bcrypt (`libbcrypt`)~~ | ❌ | — | — | **24.04 官方源不存在此包**，`apt-cache search bcrypt` 无结果。见 §6.2.1 |
 | cpp-httplib OpenSSL | `libssl-dev` | 3.0.13 | HTTPS | **首版关闭**（§6.2 尾注），nginx 反代时再启用 |
 
-> **cpp-httplib 0.14.3 vs 0.15.3** `[D-72]`：apt 提供 0.14.3，低于本 SPEC 早期引用的 0.15.3。选 apt 版是为了**消除"宿主编过、容器编不过"的版本漂移**（§6.7.1）。若实现时用到 0.15 独有 API，改用 `third_party/httplib/httplib.h` 自部署 —— **两种部署方式的 include 写法都是 `#include <httplib.h>`，源码零差异**。
+> **cpp-httplib 0.60.1（自装单头文件）** `[D-72]` `[v1.9 修订]`：v1.6~v1.8 写的是"apt 的 0.14.3"，理由是**消除"宿主机编过、容器编不过"的版本漂移**（§6.7.1）。实测本机 apt 包**从未安装**，真正在用的是 `/usr/local/include/httplib.h` **0.60.1**，故真源改用它。代价与处置：
+> - **代价**：0.60.1 晚于 SPEC 早期引用的 0.15.x，T0.5 接线时以**实际头文件**为准，不以本文档为准；
+> - **漂移风险仍在，只是换了形式**：`libcpp-httplib-dev`（0.14.3）若被误装，`find_path` 可能命中 `/usr/include` 而**静默用了旧版**。CMake 因此在 configure 时打印**实际命中的路径与版本**，命中 vendored 兜底时额外 `WARNING`；
+> - **路线 B 必须自备同一份 0.60.1**（把该头文件放进镜像），否则正是这条决策想消除的漂移；
+> - `third_party/httplib/httplib.h`（0.14.3）**降级为环境缺失时的兜底**，不再是版本真源；两处 include 写法同为 `#include <httplib.h>`，**源码零差异**这条仍然成立。
 
 **前端**（全部 **vendored** 到 `static/vendor/` `[D-73]`，**不在运行时引 CDN**；文件清单与下载命令见 §6.7.2）：
 
@@ -1889,16 +1930,20 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 | 引导 | `ca-certificates` `curl` `git` | — | — |
 | 工具链 | `g++-12` `gcc-12` `make` | 12.4.0 / 4.3 | — |
 | | `libc6-dev` | 2.39 | `sys/{resource,wait,prctl}.h`、`unistd.h` |
+| | **`cmake`** `[v1.8]` | 3.28.3 | — |
 | 第三方库 | `nlohmann-json3-dev` | 3.11.3 | `nlohmann/json.hpp` |
-| | `libcpp-httplib-dev` | **0.14.3** | **`/usr/include/httplib.h`** |
+| | **`httplib.h`（自装单头文件，非 apt）** `[v1.9]` | **0.60.1** | **`/usr/local/include/httplib.h`** |
 | | `libmysqlclient-dev` | 8.0.46 | `mysql/mysql.h` |
 | | `libssl-dev` | 3.0.13 | `openssl/blowfish.h` |
+| 测试 | **`libgtest-dev`** `[v1.8]` | 1.14.0 | `gtest/gtest.h` |
 | 数据库 | `mysql-server` `mysql-client` | 8.0.46 | — |
 
-**明确不装**：`cmake`（构建用 Makefile）、`pkg-config`（库路径固定）、`build-essential`（连带装 g++-13，与 D-13 冲突）、`libbcrypt-dev`（24.04 官方源无此包，见 §6.2.1）。
+**明确不装**：`pkg-config`（库路径固定）、`build-essential`（连带装 g++-13，与 D-13 冲突）、`libbcrypt-dev`（24.04 官方源无此包，见 §6.2.1）、**`libcpp-httplib-dev`**（v1.9：apt 的 0.14.3 不是真源，且误装会让 `find_path` 命中旧版头文件，见 §6.2 尾注）。
 
+> **`cmake` 曾经被列在这里，v1.8 起移回必需**。原理由是"构建用 Makefile，两者并存只会让人不知用哪个"—— 该理由已被"Makefile 降为薄封装、CMakeLists 成为唯一构建规则"消解。详见 §0 的 v1.8 说明。
+> **`httplib` 不走 apt**（v1.9）：cpp-httplib 是 header-only 单文件库，安装动作就是把 `httplib.h` 放进 `/usr/local/include/`，无需编译与链接（命令见 §6.7.2）。实测本机已在该路径且为 0.60.1。
 > `libc6-dev` 虽由 `g++-12 → libstdc++-12-dev → libc6-dev` 传递带入，仍显式安装 —— judge 的 `getrusage`/`wait4`/`prctl` 头文件全靠它。
-> `libcpp-httplib-dev` 实测只装 `/usr/include/httplib.h`，**不是** `/usr/include/cpp-httplib/`。两种部署方式（apt / 自部署）都用同一行 `#include <httplib.h>`。
+> **`make` 仍需要**：它是 `make build/run/test/clean` 这层入口（D-71 的运维契约），不是构建工具本身。
 
 #### 6.7.2 全部安装命令
 
@@ -1906,9 +1951,21 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 # ---------- apt ----------
 sudo apt-get update && sudo apt-get install -y \
   ca-certificates curl git \
-  g++-12 gcc-12 make libc6-dev \
-  nlohmann-json3-dev libcpp-httplib-dev libmysqlclient-dev libssl-dev \
+  g++-12 gcc-12 make cmake libc6-dev \
+  nlohmann-json3-dev libmysqlclient-dev libssl-dev \
+  libgtest-dev \
   mysql-server mysql-client
+
+# ---------- cpp-httplib（header-only 单文件，不走 apt）----------
+# ⚠️ 装 0.60.1，与宿主一致；不要装 libcpp-httplib-dev（0.14.3，见 §6.7.1）
+curl -sSL -o /tmp/httplib.h \
+  https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.60.1/httplib.h
+sudo install -m 644 /tmp/httplib.h /usr/local/include/httplib.h
+grep -m1 CPPHTTPLIB_VERSION /usr/local/include/httplib.h   # 应为 "0.60.1"
+
+# ---------- 构建（唯一构建入口是 CMakeLists.txt，Makefile 只是转发）----------
+make build        # == cmake -S . -B build -DCMAKE_CXX_COMPILER=g++-12 && cmake --build build -j
+make test         # == ctest --test-dir build --output-on-failure（44 条 config 单测）
 
 # ---------- 前端 7 个文件（vendored）----------
 # ⚠️ 必须用 /npm/ 路径：/gh/ 实测对 codemirror.min.js 与 marked.min.js 均 404
@@ -1953,16 +2010,21 @@ OJ_FENCE_MULTIPLIER=10          # [D-62] §5.4.2.1 的 ×10，改闸门前必须
 
 > `OJ_JUDGE_GATE` → 墙钟放大倍数 → 兜底墙钟余量 → 压测口径（AC-38）**是一条链**，改一个要重算其余（§5.4.2.1）。
 
-#### 6.7.4 验证（6 项，全绿才继续）
+#### 6.7.4 验证（8 项，全绿才继续）
 
 ```bash
 g++-12 --version | head -1                             # 应为 12.x
-dpkg -L libcpp-httplib-dev | grep httplib.h           # 应为 /usr/include/httplib.h
+cmake --version | head -1                              # 应为 ≥ 3.20（实测 3.28.3）
+ls /usr/include/gtest/gtest.h                           # 单测依赖（libgtest-dev）
+grep -m1 CPPHTTPLIB_VERSION /usr/local/include/httplib.h   # 应为 "0.60.1"（不是 apt 的 0.14.3）
 ls /usr/include/{nlohmann/json.hpp,mysql/mysql.h,openssl/blowfish.h}
 ls /usr/include/sys/{resource.h,wait.h,prctl.h}
 find static/vendor -name '*.js' -size -1k | wc -l      # 应为 0（404 响应体只有几十字节）
 mysql -h 127.0.0.1 -uoj -poj oj -e "SELECT VERSION();"
 ```
+
+> **构建系统自检**（v1.8 新增）：`make build && make test` 应产出 `build/oj` 与全部单测，`ctest` 44 条全绿。
+> **httplib 双路径**（v1.9）：CMake 优先用 `/usr/local/include/httplib.h`（0.60.1，configure 时打印实际命中路径与版本）；缺失则 `WARNING` 并回退 `third_party/httplib`（0.14.3，**版本不一致，视为环境未就绪**）；两者都没有才 `FATAL_ERROR`。
 
 #### 6.7.5 可选：路线 B（Docker）
 
@@ -2297,21 +2359,32 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 ### M0 — 地基（Day 1–2）
 
-- [√] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **§6.7.2 的全部命令** + **§6.7.4 的 6 项验证**
-  - **7 项验证必须全绿才继续**，尤其第 ⑦ 项（fork+setrlimit+prctl+wait4）—— 它失败意味着 §5 全部机制不可用
+- [√] T0.0 安装依赖 `[D-71] [D-72] [D-73] [D-75]`：执行 **§6.7.2 的全部命令** + **§6.7.4 的 8 项验证**
+  - **验证必须全绿才继续**，尤其 fork+setrlimit+prctl+wait4 那一项 —— 它失败意味着 §5 全部机制不可用
   - 初始化本机 `mysqld`，**把 `innodb_buffer_pool_size` 设为 64MB**（1967MB 机器上不调会与 judge 抢内存，见 §2.1-A 第 3 条）
-  - 装 **不要** `cmake` / `pkg-config` / `build-essential`（§6.7.1 的「明确不装」行，理由见该节）
-- [√] T0.1 目录骨架 + **`Makefile`（路线 A 主入口）** `[D-71]`
-  - `make build` / `make run` / `make test` / `make clean`
-  - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `./oj`
+  - 装 **不要** `pkg-config` / `build-essential` / `libcpp-httplib-dev`（§6.7.1 的「明确不装」行，理由见该节）；**`cmake` 改为必装**（v1.8，见下）
+  - **httplib 装 0.60.1 单头文件到 `/usr/local/include/`**（v1.9），不要用 apt 的 0.14.3
+- [√] T0.1 目录骨架 + **构建入口** `[D-71]`
+  - `make build` / `make run` / `make test` / `make clean`（契约不变）
+  - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `build/oj`
+  - **v1.8：`Makefile` 降为薄封装**，真实构建规则在 `CMakeLists.txt`（`ojcore` 静态库 + `oj` 可执行 + 测试开关）与 `tests/CMakeLists.txt`（GTest + `gtest_discover_tests`）
+  - `make test` == `ctest --test-dir build --output-on-failure`，每个 `TEST_F` 是 ctest 里一条独立用例
+- [√] T0.1.1 **CMake 构建规则** `[v1.8]`
+  - 依赖全部 `find_package` / `find_path` 发现：Threads、OpenSSL(libcrypto)、nlohmann_json、mysqlclient、httplib、GTest
+  - **httplib 双路径**：`/usr/local/include/httplib.h`（**0.60.1，版本真源**，v1.9）优先，缺失则 `WARNING` + 回退 `third_party/httplib`（0.14.3，版本不一致，视为环境未就绪），两者都没有才 `FATAL_ERROR`
+  - **源文件用显式列表而非 GLOB**：漏加文件时报错，而不是静默不编译
+  - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
   - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
 - [ ] T0.2 【路线 B 可选】`Dockerfile` + `docker-compose.yml`：`ubuntu:22.04` 装 `g++-12`、MySQL Connector、cmake
-  - **不在关键路径上** —— 若 T0.1 的 Makefile 路线跑通，本任务可延后到 M5 或直接砍掉
+  - **不在关键路径上** —— 若 T0.1 的构建入口跑通，本任务可延后到 M5 或直接砍掉
+  - 路线 B 里构建同样走 `cmake -S . -B build`（v1.8 后 Docker 镜像不必自带 make）
+  - ⚠️ **镜像必须自带 httplib 0.60.1**（v1.9）—— 宿主用的就是这份，不放进去就正是 `[D-72]` 想消除的版本漂移
 - [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，**仍 11 张表**，注意外键依赖顺序：`problems`/`users`/`tags` 须先建；含 v1.4 新增的 `problems.hint_md`）
   - 路线 A：应用启动时**幂等执行**这份 SQL（§2.1-A 第 1 条），不用 initdb 机制
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
+  - **已完成 `config.h`/`.env` 部分**：`tests/config_test.cpp` 44 条单测全绿；`log.h`/`response.h`/`errors.h` 尚未开工，故本条**不勾选**
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
 - [ ] T0.6 **vendored 前端库接入** `[D-73]`
   - 5 个 CodeMirror 文件按 **`defer` + 依赖顺序**引入（见 §6.1 末尾的加载顺序说明）
@@ -2736,5 +2809,15 @@ V-3  验证 §5.3（stdout/stderr 分流是否可靠）
 **v1.7 的联动面**（**不新增决策，仍 75 项**）：纯依赖清单的事实性补正。改动仅 **§0（+v1.7 补正说明）/ §6.7（整章重写为「包清单 + 全部命令」，原 6 个子节与附录 A 合并为一处，+5 必需项、−3 不需要项）/ §9 T0.0（改为指向 §6.7）**。
 
 > **v1.7 刻意没动的四处**：① **决策表** —— 这轮是"清单对不上现实"，不是"需要做新选择"，不占决策号；② **§3.2 DDL** —— 依赖装法与持久化形态无关；③ **§2.1-A/B 两张图** —— 路线划分不变，只是不再假设机器已配好；④ **Docker 相关内容** —— 路线 B 仍为可选，合并进 §6.7.5 后不受影响。
+
+**v1.8 的联动面**（**不新增决策，仍 75 项**）：构建入口轮。`cmake` 由「⛔ 不装」移回「必装」，`CMakeLists.txt` 成为唯一构建规则，`Makefile` 降为薄封装。改动仅 **§0（版本表 v1.8 + 新增构建入口轮说明 + 标注推翻 v1.7 的第 5 行处置）/ §6.1（目录结构 +CMakeLists.txt、tests/CMakeLists.txt、两个测试脚本）/ §6.7.1（包清单 12→13 项，cmake 与 libgtest-dev 入列，「明确不装」删掉 cmake）/ §6.7.2（安装命令 +cmake +libgtest-dev +构建自检两行）/ §6.7.4（验证 6→8 项）/ §9（T0.0 / T0.1 改写 + 新增 T0.1.1、T0.2 备注、T0.4 进度备注）/ §12（本段）+ `dependence.md` §1、§4、§5**。
+
+> **v1.8 刻意没动的六处**：① **决策表** —— `[D-71]` 的"宿主机原生构建"与 `[D-13]` 的 g++-12 都没变，只是构建规则的文件换了；② **§3.2 DDL**；③ **§5 判题流水线** —— judge spawn 的 `g++-12` 与本项目的 CMAKE 编译器互不相干；④ **§6.3 API 契约与错误码**；⑤ **§2.3 线程模型** —— 构建期多一个静态库不改变运行期任何并发关系；⑥ **页面与前端** —— `static/` 完全不参与编译。
+>
+> **一条需要记住的隐含关系**（与 §5.4.2.1、`§6.3.6` 同类）：`CMakeLists.txt` 里 `OJ_JUDGE_WORKERS`/`OJ_JUDGE_GATE` 的关系式校验依赖 `.env`，而 `.env` 改完**必须重启**才重新生效 —— 这正是 §6.3.1 那套「改配置 + 重启」哲学在构建期的一致体现。
+
+**v1.9 的联动面**（**不新增决策，仍 75 项；修订 `[D-72]` 的版本口径**）：httplib 版本对齐轮。改动仅 **§0（版本表 + `[D-72]` 行 + 新增 v1.9 说明）/ §6.2（库表 cpp-httplib 行 + 尾注重写）/ §6.7.1（包清单 `libcpp-httplib-dev` → 自装单头文件，并移入「明确不装」）/ §6.7.2（安装命令去掉 apt 包、增加 `install` 一行）/ §6.7.4（验证项换成 `grep CPPHTTPLIB_VERSION`）/ §9（T0.0、T0.1.1 的 httplib 路径说明、T0.2 的镜像要求）/ §12（本段）+ `dependence.md` §1、§1.1、§5**。
+
+> **v1.9 刻意没动的四处**：① **`#include <httplib.h>` 的写法** —— 换版本不改写法，这是选 header-only 单文件库的最大好处；② **`CPPHTTPLIB_OPENSSL_SUPPORT` 关闭**（§6.2，单机 HTTP 不引 OpenSSL 依赖）；③ **§5 判题流水线与 §3.2 DDL** —— httplib 只出现在 HTTP 层；④ **T0.4 的勾选状态** —— log/response/errors 未完成，`config` 部分做完也不勾选。
 
 ---
