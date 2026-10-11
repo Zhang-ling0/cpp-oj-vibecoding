@@ -140,6 +140,24 @@ OJ_FENCE_MULTIPLIER=10
 
 ⚠️ **将来调高 `OJ_JUDGE_GATE` 时必须同步调高 `OJ_FENCE_MULTIPLIER`**，否则并发评测时 CPU 用量高但完全合法的解法会被误判为 TLE（墙钟被分核拉长后超过兜底阈值）。详见 SPEC §5.4.2.1。
 
+#### 可选键（仓库 `.env` 已预置，SPEC 未列为必填）
+
+下面这些键 SPEC 没有硬性要求，取值默认落在 SPEC 已定的常量上，留成环境变量只是为了测试隔离与临时调参：
+
+| 变量 | 默认 | 来源 |
+|---|---|---|
+| `OJ_JUDGE_USER_GATE` | 2 | §1.4 单用户同时评测数上限 |
+| `OJ_HTTP_THREADS` | 8 | §2.3 httplib 线程池 |
+| `OJ_JUDGE_WORKDIR` | `/tmp/oj-judge` | §5.1 工作区 |
+| `OJ_PROBLEMS_DIR` / `OJ_STATIC_DIR` | `./problems` / `./static` | §2.1-A |
+| `OJ_LOG_DIR` / `OJ_LOG_RETENTION_DAYS` | `./logs` / 7 | §1.4 可观测 |
+| `OJ_SESSION_TTL_DAYS` | 7 | §1.3 P1 |
+| `OJ_MAX_CODE_BYTES` | 65536 | §5.8 |
+| `OJ_RATE_WINDOW_SECONDS` / `OJ_RATE_MAX_SUBMITS` | 60 / 10 | §5.8 |
+
+> `.env` 支持 `export KEY=VALUE`、引号包裹值、以及**行内注释**（仅「空白之后的 `#` 才算注释，所以 `MYSQL_PASSWORD=p#ss` 不会被截断）。
+> 校验由 `src/common/config.cpp` 在启动时执行：值非法 → `WARN` 并回落默认值；**闸门 ≠ 2 × workers 或兜底墙钟不等式被破坏 → `ERROR` 并拒绝启动**（详见 SPEC §2.3 / §5.4.2.1）。
+
 ---
 
 ## 5. 验证（6 项，全绿再继续）
