@@ -18,6 +18,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(oj VERSION 0.1.0 LANGUAGES CXX)
 
+# 导出编译数据库（build/compile_commands.json）：让 VSCode 的 cpptools / clangd /
+# ccls 读到【CMake 真实使用的】-I / -std / 告警开关，而不是手写第二份 flags 副本
+# ——那份副本一定会漂移。必须在创建 target 之前设置。
+# 仅 Makefile/Ninja 生成器有效（Xcode/MSVC 下是 no-op，与本项目无关）。
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # ---- 语言标准与全局选项 ---------------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)          # D-13：C++17
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -140,4 +146,19 @@ option(OJ_BUILD_TESTS "构建 gtest 单元测试" ON)
 if(OJ_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+# ---- 根目录编译数据库软链接 ------------------------------------------------------
+# 为什么要链接：cpptools 默认从【工作区根目录及上级】找 compile_commands.json，
+# 而 build/ 是 src/ 的兄弟目录而不是祖先，向上找找不到 —— 少了它，编辑器里每个
+# .cpp 第一行的 #include "common/config.h" 都会报错，跨头文件跳转也会失效。
+# 用相对路径链接，仓库整体拷贝/移动后依然有效。
+set(OJ_COMPDB_LINK "${CMAKE_SOURCE_DIR}/compile_commands.json")
+if(EXISTS "${OJ_COMPDB_LINK}" AND NOT IS_SYMLINK "${OJ_COMPDB_LINK}")
+  message(WARNING "根目录已存在非符号链接的 compile_commands.json，保持原样不覆盖")
+else()
+  file(REMOVE "${OJ_COMPDB_LINK}")
+  file(RELATIVE_PATH OJ_COMPDB_REL "${CMAKE_SOURCE_DIR}"
+       "${CMAKE_BINARY_DIR}/compile_commands.json")
+  file(CREATE_LINK "${OJ_COMPDB_REL}" "${OJ_COMPDB_LINK}" SYMBOLIC)
 endif()

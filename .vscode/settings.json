@@ -1,0 +1,15 @@
+{
+  // CppOJ 的编辑器约定：构建一律走终端的 `make build`（等价于 cmake --build build），
+  // VSCode 只负责写代码。理由与 CMake Tools 相关的坑见 dependence.md §1.1。
+  //
+  // 关掉"打开就 configure"：CMake Tools 默认会在 .vscode/build 下另起一套构建目录，
+  // 与 Makefile 用的 build/ 变成两套产物、两个 compile_commands.json，看代码时
+  // 容易对着过时的那套。
+  "cmake.configureOnOpen": false,
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+
+  // 根目录那个软链接指向 build/compile_commands.json（CMake 自动维护）。
+  // 显式写出来是为了确定性：cpptools 默认会自己向上找，但一旦将来在仓库外面
+  // 打开文件夹或换工具，这行能省掉一轮"为什么头文件全红"的排查。
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json"
+}

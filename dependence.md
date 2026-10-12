@@ -63,6 +63,27 @@ make clean
 
 > **`[D-72]` v1.9 的口径**：httplib 真源是本机 `/usr/local/include/httplib.h` **0.60.1**，不是 apt 的 0.14.3（实测 apt 包从未安装）。头文件是 header-only 单文件，"安装"= 放一个文件，无需编译链接。仓库内 `third_party/httplib/httplib.h`（0.14.3）**只作为环境缺失时的兜底**，不再是版本真源。路线 B 的镜像必须自带同一份 0.60.1。
 
+### 1.2 编辑器 / 静态分析（v1.9）
+
+`CMakeLists.txt` 打开了 `CMAKE_EXPORT_COMPILE_COMMANDS`，产物是 `build/compile_commands.json`，并在**仓库根目录建一个相对软链接**指向它（每次 configure 自动重建，删了也会自愈）。
+
+```bash
+readlink compile_commands.json      # → build/compile_commands.json
+python3 -m json.tool compile_commands.json > /dev/null   # 23 条：ojcore 21 + oj 1 + config_test 1
+```
+
+**约定：构建只在终端里 `make build`，VSCode 里不点 configure。**
+
+| 事项 | 说明 |
+|---|---|
+| 为什么需要它 | cpptools 需要 `-I<root>/include` 才能解析 `#include "common/config.h"`；缺了就是每个源文件第一行报错 + 跨头文件跳转失效 |
+| 为什么软链接在根目录 | cpptools 从**工作区根目录及上级**找该文件，而 `build/` 是 `src/` 的兄弟目录不是祖先，向上找找不到 |
+| 为什么关掉 CMake Tools 的自动 configure | 它默认在 `.vscode/build` 另起一套构建目录，与 `make build` 的 `build/` 变成两套产物、两个 compdb；`.vscode/settings.json` 已关掉它并把 build 目录指到 `build/` |
+| 换构建目录 | `cmake -S . -B /tmp/x` 后软链接会自动改指向该目录的 compdb（相对路径），仍可用 |
+| 撞到「根目录已存在非符号链接的 compile_commands.json」 | 说明有人手写了它；CMake 不会覆盖，需要自己删掉或把真实 compdb 挪到别处 |
+
+> 装了 `clang-format` 但仓库里**没有** `.clangformat`，本项目暂不做代码风格统一 —— 那是独立决定（涉及 §10.3 的可讲述性），不夹带进构建配置。clangd 也未安装；VSCode 用的是自带的 cpptools 1.34.4。
+
 ---
 
 ## 2. 前端库（7 个文件，vendored 到 `static/vendor/`）
