@@ -2379,8 +2379,12 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **不在关键路径上** —— 若 T0.1 的构建入口跑通，本任务可延后到 M5 或直接砍掉
   - 路线 B 里构建同样走 `cmake -S . -B build`（v1.8 后 Docker 镜像不必自带 make）
   - ⚠️ **镜像必须自带 httplib 0.60.1**（v1.9）—— 宿主用的就是这份，不放进去就正是 `[D-72]` 想消除的版本漂移
-- [ ] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，**仍 11 张表**，注意外键依赖顺序：`problems`/`users`/`tags` 须先建；含 v1.4 新增的 `problems.hint_md`）
+- [√] T0.3 `db/init/01-schema.sql`（§3.2 全量 DDL，**仍 11 张表**，注意外键依赖顺序：`problems`/`users`/`tags` 须先建；含 v1.4 新增的 `problems.hint_md`）
   - 路线 A：应用启动时**幂等执行**这份 SQL（§2.1-A 第 1 条），不用 initdb 机制
+  - **已接线**：`main()` 按 §2.3 启动顺序在连接池就绪之后执行 —— 读文件 → `split_statements()` 切分 → `exec_script()` 逐条执行 → **核对 11 张表确实存在于当前库**（`information_schema`）。DDL 文件本身早于本轮就已存在且已用 `IF NOT EXISTS`，本轮补的是**执行侧**
+  - **三道「响亮地失败」**：DDL 文件读不到 / 切不出任何 `CREATE TABLE` / 切出条数与实际执行条数不等 / 表没真的建出来 —— 任一命中都打印人可读原因并 `exit(1)`，而不是留一张半套的库让 T1.2 去炸
+  - 表名**从 DDL 文本里扫出来**而非写死 11 个：写死就多出一份必须手工同步的副本，漂移无声。切分复用 T3.1 的 `db::split_statements()`（同一套去注释规则）—— 若自己扫原文，本文件头部注释里出现的 `CREATE TABLE` 字样会被误当成一条建表语句（**本轮实际踩到过**）
+  - 空库 → 11 张表、二次启动幂等，均已实测；`db/reset.sql` 保持不动（它不能进 `init/`，否则首启建完表又删掉）
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
@@ -2443,6 +2447,15 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 ### M3 — API 层（Day 11–13）
 
 - [ ] T3.1 `db/mysql_pool.h` + 互斥量串行化；所有 DAO 用预处理语句（**禁止字符串拼接 SQL**）
+  - **已完成 `db/mysql_pool.h` + `src/db/mysql_pool.cpp`**：`tests/mysql_pool_test.cpp` **35 条单测全绿**（连不上 MySQL 时整体 `GTEST_SKIP`），`-DOJ_SANITIZE=address,undefined` 下同样全绿
+  - `[D-21]` 的串行化落在**一把进程级 `std::mutex`** 上，`Lease` 是持有它的 RAII 凭证：租约内可跑多条语句，归还时按「回滚未提交事务 → 置空闲并通知 → 释放全局互斥量」的顺序（顺序反了会与等待者互锁）
+  - **超时四档**（串行化 ⇒ 一条慢语句拖垮全站，故每条连接都带超时）：connect 5s / read 15s / write 15s / `innodb_lock_wait_timeout` 5s（MySQL 默认 50s，在本模型下等于停站 50s）
+  - **断连只重连、不重试**：空闲时可安全重连；语句失败一律如实上抛 —— 重放一次 `INSERT` 就是写两次（T2.11 的写回尤其致命）
+  - **两道本地护栏**拦在「发 SQL 之前」：占位符个数与参数个数不符直接失败；`exec()` 拒绝含 `?` 与返回结果集的语句
+  - **连接建立后硬校验**三项，任何一项不满足则 `init()` 失败并给出修复命令：sql_mode 含 `STRICT_TRANS_TABLES`（否则 `VARCHAR(255)` 静默截断）/ 含 `NO_ENGINE_SUBSTITUTION`（否则 DDL 写错 ENGINE 静默退化成 MyISAM，硬删账号依赖的 CASCADE 会失效 `[D-57]`）/ 字符集 utf8mb4；会话时区锁死 `+00:00`（`[D-17]` 存 UTC）
+  - **不引入新环境变量**：`PoolOptions` 由 `common::config()` 的 `MYSQL_*` 派生，其余为模块内默认值 —— 与 T0.4「新增键会让 §6.7.3 清单与 config 单测失配」的既有约定一致
+  - `dao.h` 尚空，「所有 DAO 用预处理语句」要等 **T3.2**，故本条**不勾选**
+  - **已接线**：`main()` 在 `load_config()` / `init_logging()` 之后调用 `init_from_config()`，失败即打印原因并 `exit(1)`；退出前 `shutdown()` 归还连接。§2.3 的启动顺序因此推进到「DB 就绪 + 建表完成」（T0.3），第 5~8 步（题库/角色/judge/listen）仍待接线
 - [ ] T3.2 DAO：`user` `problem` `problem_case` `problem_param` `tag` `submission` `submission_case_result` `submission_compile_error` 八组
 - [ ] T3.3 认证：自实现 bcrypt（`libssl-dev` Blowfish，`D-74`）注册/校验 + 64 hex token 会话 + HttpOnly Cookie
   - **先写测试向量校验**（RFC 6234 / Provos 的 `$2a$` / `$2b$` 用例），**逐字节比对**参考输出；base64 变体字母表是 `./A-Za-z0-9` 顺序而非标准 base64，是最易错点（§6.2.1）
