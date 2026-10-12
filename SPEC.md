@@ -2384,7 +2384,9 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 - [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
-  - **已完成 `config.h`/`.env` 部分**：`tests/config_test.cpp` 44 条单测全绿；`log.h`/`response.h`/`errors.h` 尚未开工，故本条**不勾选**
+  - **已完成 `config.h`/`.env` 部分**：`tests/config_test.cpp` 45 条单测全绿
+  - **已完成 `log.h` 部分**：`tests/log_test.cpp` 38 条单测全绿，覆盖 `[D-34]` 双文件隔离、按天切割（含改名失败降级）、保留 N 天清理（只删本模块形状的文件）、行不变量与 UTF-8 安全截断、11 个并发写者；`-DOJ_SANITIZE=address,undefined` 下同样全绿（本机 LSan/TSan 受限，见 CMakeLists 注释）
+  - `response.h`/`errors.h` 尚未开工，故本条**不勾选**
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
 - [ ] T0.6 **vendored 前端库接入** `[D-73]`
   - 5 个 CodeMirror 文件按 **`defer` + 依赖顺序**引入（见 §6.1 末尾的加载顺序说明）

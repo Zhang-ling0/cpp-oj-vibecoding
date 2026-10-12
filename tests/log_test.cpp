@@ -4,15 +4,15 @@
 // 运行：tests/run_unit_tests.sh（ctest 会把每个 TEST 展开成一条用例）
 //
 // 【测什么】
-//   A. 初始化：目录自建、双文件同时创建、报告内容、无参版读 config().log_dir
-//   B. 行不变量：每行带前缀、单行 API 转义 '\n'、UTF-8 原样透传
-//   C. 双通道隔离 [D-34] + 等级阈值（app=INFO / judge=DEBUG，NF-5 的前提）
-//   D. 多行：log_text 逐行加前缀、log_block 缩进 + 边界标记（T2.10 生成代码）
+//   A. 初始化：目录自建、双文件同时创建、报告内容、无参版读 config().log_dir、日期助手
+//   B. 行不变量：每行带前缀、单行 API 转义 '\n'、UTF-8 原样透传、空载荷与边界输入
+//   C. 双通道隔离 [D-34] + 等级阈值（app=INFO / judge=DEBUG，NF-5 的前提）+ 控制台镜像
+//   D. 多行：log_text 逐行加前缀、log_block 缩进 + 边界标记、judge 日志的 T2.10 契约
 //   E. 结构化字段 log_kv（含空格的取值加引号）
-//   F. 按天切割：惰性触发、两个通道各自独立、同名目标不覆盖（追加 .1）
+//   F. 按天切割：惰性触发、连续多天、两个通道各自独立、同名目标不覆盖、改名失败降级
 //   G. 保留 N 天：只删本模块形状的文件、边界日保留、非日志文件不动
 //   H. 并发：8 线程 × N 条，条数与行数一致（§2.3 的 11 个写者里最忙的那批）
-//   I. 失败与降级：未初始化不建文件、写失败不崩、shutdown 幂等、超长截断
+//   I. 失败、降级与截断：未初始化不建文件、改名失败不丢日志、健康路径 failures=0、截断
 //
 // 【怎么测"按天"】靠 log_test_set_time() 覆盖时钟（与 config::reset_config() 同一性质）。
 //   真的等一天不现实，而切割逻辑里唯一与时间有关的输入就是"当前本地日期"。
@@ -118,6 +118,26 @@ std::string body_of(const std::string& line, const char* tag) {
   if (pos == std::string::npos) return "<前缀缺失>";
   return line.substr(pos + marker.size());
 }
+
+// 临时把日志目录改成"只读"，析构时恢复。
+// 必须是 RAII：断言失败时 ASSERT_* 会提前 return，没有它就会把只读目录
+// 留给 TearDown 的 remove_all —— 删不掉，临时目录残留在 /tmp。
+class DirReadOnlyGuard {
+ public:
+  explicit DirReadOnlyGuard(const std::string& dir) : dir_(dir) {
+    fs::permissions(dir_, fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+  }
+  ~DirReadOnlyGuard() {
+    std::error_code ec;
+    fs::permissions(dir_, fs::perms::owner_all, fs::perm_options::add, ec);
+  }
+  DirReadOnlyGuard(const DirReadOnlyGuard&) = delete;
+  DirReadOnlyGuard& operator=(const DirReadOnlyGuard&) = delete;
+
+ private:
+  std::string dir_;
+};
 
 class LogTest : public ::testing::Test {
  protected:
@@ -230,6 +250,16 @@ TEST_F(LogTest, NoArgInitUsesConfigLogDir) {
 // B. 行不变量
 // =============================================================================
 
+TEST_F(LogTest, LogTodayFollowsClockOverride) {
+  log_test_set_time(day_offset(3));
+
+  EXPECT_EQ(log_today(), date_of(day_offset(3)));
+  init_default();
+  EXPECT_EQ(log_current_date(LogChannel::kApp), log_today());
+  EXPECT_EQ(log_current_date(LogChannel::kJudge), log_today())
+      << "两个通道的当前文件覆盖同一个本地日期";
+}
+
 TEST_F(LogTest, EveryLineCarriesFullPrefix) {
   init_default();
 
@@ -265,6 +295,30 @@ TEST_F(LogTest, Utf8AndTabsSurvive) {
   ASSERT_EQ(lines.size(), 2u);
   EXPECT_NE(lines[0].find("alice、carol"), std::string::npos) << lines[0];
   EXPECT_NE(lines[1].find("缩进\\there"), std::string::npos) << lines[1];
+}
+
+TEST_F(LogTest, EmptyPayloadsAndEdgeInputs) {
+  init_default();
+
+  log_text(LogChannel::kApp, LogLevel::kInfo, "");
+  log_block(LogChannel::kJudge, LogLevel::kDebug, "empty", "");
+  log_kv(LogChannel::kJudge, LogLevel::kInfo, "queue", {});
+  log_kv(LogChannel::kJudge, LogLevel::kWarn, "queue", {{"ahead", ""}});
+  log_info(LogChannel::kApp, "结尾没有换行");
+
+  // 空文本仍然产出一条带前缀的行（行不变量对空正文同样成立）
+  const std::vector<std::string> app = read_lines(app_path());
+  ASSERT_EQ(app.size(), 2u);
+  EXPECT_EQ(body_of(app[0], "app"), "") << app[0];
+  EXPECT_NE(app[1].find("结尾没有换行"), std::string::npos);
+
+  // 空块：头 + 一行空正文 + 尾，共 3 行；行数/字节数按【实际写出的】算
+  const std::vector<std::string> judge = read_lines(judge_path());
+  ASSERT_EQ(judge.size(), 5u);
+  EXPECT_EQ(body_of(judge[0], "judge"), "===== empty（1 行 / 0 字节）=====");
+  EXPECT_EQ(body_of(judge[2], "judge"), "===== empty 结束 =====");
+  EXPECT_EQ(body_of(judge[3], "judge"), "queue") << "无字段时只剩事件名";
+  EXPECT_EQ(body_of(judge[4], "judge"), "queue ahead=\"\"") << "空值必须加引号，否则字段歧义";
 }
 
 // =============================================================================
@@ -313,6 +367,41 @@ TEST_F(LogTest, SetMinLevelTakesEffectImmediately) {
   EXPECT_EQ(read_file(app_path()).find("WARN 现在低于阈值"), std::string::npos);
 }
 
+TEST_F(LogTest, ConsoleMirrorWritesOnlyAppLinesToStderr) {
+  LogOptions options;
+  options.dir = dir_;
+  options.console_mirror = true;
+  init_logging(options);  // 放在捕获之前，避免把 init 的告警一起吞进来
+
+  testing::internal::CaptureStderr();
+  log_info(LogChannel::kApp, "镜像到 stderr 的行");
+  log_info(LogChannel::kJudge, "不镜像的 judge 行");
+  const std::string captured = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(captured.find("镜像到 stderr 的行"), std::string::npos) << captured;
+  EXPECT_EQ(captured.find("不镜像的 judge 行"), std::string::npos)
+      << "镜像只对 app 通道开启，否则 judge 日志会被刷屏（log.cpp write_line 的 mirror 参数）";
+  // 镜像只是抄一份，两个文件本身照写
+  EXPECT_NE(read_file(app_path()).find("镜像到 stderr 的行"), std::string::npos);
+  EXPECT_NE(read_file(judge_path()).find("不镜像的 judge 行"), std::string::npos);
+}
+
+TEST_F(LogTest, ErrorLevelSurvivesHighestThreshold) {
+  init_default();
+
+  set_min_level(LogChannel::kApp, LogLevel::kError);
+  log_warn(LogChannel::kApp, "低于阈值");
+  log_error(LogChannel::kApp, "到达阈值");
+
+  const std::vector<std::string> lines = read_lines(app_path());
+  ASSERT_EQ(lines.size(), 1u);
+  EXPECT_NE(lines[0].find(" ERROR "), std::string::npos) << lines[0];
+  EXPECT_NE(lines[0].find("到达阈值"), std::string::npos);
+  const LogStats stats = log_stats();
+  EXPECT_EQ(stats.filtered[0], 1) << "被阈值挡下的也要计数，否则排查时看不出有人在调级别";
+  EXPECT_EQ(stats.written[0], 1);
+}
+
 // =============================================================================
 // D. 多行（启动回显 / 生成代码）
 // =============================================================================
@@ -353,6 +442,40 @@ TEST_F(LogTest, LogBlockKeepsBannersAndIndentsBody) {
   for (const std::string& line : lines) {
     EXPECT_NE(line.find("[judge] "), std::string::npos) << line;
   }
+}
+
+// 【T2.10 / NF-5 契约】judge 日志必须能独立支撑"按 judge 日志修正 JSON"（SPEC §4.3 第 5 步）
+// 与"题库 harness 编译报错时排查"。因此这里按 worker 将来要写的六项逐条断言，
+// 而不是逐条断言渲染函数 —— 渲染函数测了不等于内容齐全。
+TEST_F(LogTest, JudgeLogCarriesEverythingT210Requires) {
+  init_default();
+
+  // ①~③ §5.2 的三个生成文件
+  log_block(LogChannel::kJudge, LogLevel::kDebug, "solution_decl.h",
+            "struct Solution {\n\tstd::vector<int> twoSum(std::vector<int>& nums, int target);\n};");
+  log_block(LogChannel::kJudge, LogLevel::kDebug, "tester_util.h",
+            "// 生成的用例执行、结果比较、getrusage 工具\nint run();");
+  log_block(LogChannel::kJudge, LogLevel::kDebug, "tester.cpp", "int main() { run(); return 0; }");
+  // ④~⑤ §5.2 的两条编译命令，原文照抄，避免"文档改了测试没跟"的漂移
+  log_kv(LogChannel::kJudge, LogLevel::kInfo, "compile",
+         {{"stage", "1"}, {"cmd", "g++ -std=c++17 -O2 -Wall -c user.cpp -o user.o"}});
+  log_kv(LogChannel::kJudge, LogLevel::kInfo, "compile",
+         {{"stage", "2"}, {"cmd", "g++ -std=c++17 -O2 user.o tester.cpp -o run"}});
+  // ⑥ 子进程退出原因（§5.4 的 RLIMIT_CPU / 停滞检测 / 兜底墙钟三条路径都落在这里）
+  log_kv(LogChannel::kJudge, LogLevel::kError, "case_exit",
+         {{"case_idx", "3"}, {"signal", "SIGXCPU"},
+          {"reason", "RLIMIT_CPU 超限；kill(-pgid, SIGKILL) 整组"}});
+
+  const std::string judge = read_file(judge_path());
+  for (const char* anchor :
+       {"solution_decl.h", "tester_util.h", "tester.cpp",
+        "g++ -std=c++17 -O2 -Wall -c user.cpp -o user.o",
+        "g++ -std=c++17 -O2 user.o tester.cpp -o run",
+        "SIGXCPU", "kill(-pgid, SIGKILL)"}) {
+    EXPECT_NE(judge.find(anchor), std::string::npos) << "judge 日志缺少：" << anchor;
+  }
+  // [D-34]：用户代码与编译产物只进 judge 通道，app.log 一个字节都不该有
+  EXPECT_EQ(read_lines(app_path()).size(), 0u) << read_file(app_path());
 }
 
 // =============================================================================
@@ -417,6 +540,30 @@ TEST_F(LogTest, RotationHappensLazilyOnFirstWriteAfterMidnight) {
   EXPECT_EQ(read_file(app_path()).find("第一天的最后一条"), std::string::npos);
   EXPECT_NE(read_file(app_path()).find("第二天的第一条"), std::string::npos);
   EXPECT_EQ(log_current_date(LogChannel::kApp), day2_name);
+}
+
+TEST_F(LogTest, RotationOverMultipleDaysCreatesOneFilePerDay) {
+  init_default();
+
+  for (int day = 0; day < 3; ++day) {
+    log_test_set_time(day_offset(day));
+    log_info(LogChannel::kApp, "day" + std::to_string(day));
+  }
+
+  EXPECT_EQ(log_stats().rotations[0], 2) << "第 0 天不切，第 1、2 天各切一次";
+  // day0 / day1 已被切走；day2 是【当前文件】—— 切割发生在"下一条写入"，不是"零点"
+  for (int day = 0; day < 2; ++day) {
+    const std::string path = app_path() + "." + date_of(day_offset(day));
+    ASSERT_TRUE(fs::exists(path)) << path;
+    EXPECT_NE(read_file(path).find("day" + std::to_string(day)), std::string::npos) << path;
+  }
+  EXPECT_FALSE(fs::exists(app_path() + "." + date_of(day_offset(2))));
+  const std::string current = read_file(app_path());
+  EXPECT_NE(current.find("day2"), std::string::npos);
+  EXPECT_EQ(current.find("day0"), std::string::npos);
+  EXPECT_EQ(log_current_date(LogChannel::kApp), date_of(day_offset(2)));
+  // 保留期 7 天，这三天的文件都必须还在
+  EXPECT_EQ(log_stats().deleted[0], 0);
 }
 
 TEST_F(LogTest, RotationKeepsBothChannelsIndependent) {
@@ -592,6 +739,45 @@ TEST_F(LogTest, ShutdownIsIdempotentAndPostShutdownWritesAreSafe) {
   EXPECT_FALSE(log_initialized());
   // 关闭前的日志仍在文件里
   EXPECT_NE(read_file(app_path()).find("关闭前"), std::string::npos);
+}
+
+TEST_F(LogTest, RotationFailureFallsBackToAppendAndDoesNotCrash) {
+  // 本用例用目录权限制造 rename 失败；root 不受权限约束，语义不成立
+  if (::geteuid() == 0) GTEST_SKIP() << "root 绕过目录权限，本用例在 root 下无意义";
+  init_default();
+  log_info(LogChannel::kApp, "切割前的日志");
+
+  {
+    DirReadOnlyGuard guard(dir_);  // 跨天时改名必然失败（EACCES）
+    log_test_set_time(day_offset(1));
+    log_info(LogChannel::kApp, "跨天时目录不可写");
+  }  // 权限在此恢复
+
+  EXPECT_GE(log_stats().failures[0], 1) << "改名失败必须自己暴露，不能静默换文件";
+  const std::string content = read_file(app_path());
+  EXPECT_NE(content.find("切割前的日志"), std::string::npos)
+      << "改名失败时原文件必须保住（否则当天日志全丢）";
+  EXPECT_NE(content.find("跨天时目录不可写"), std::string::npos)
+      << "数据应追加回原文件而不是被丢弃";
+  EXPECT_FALSE(fs::exists(app_path() + "." + date_of(base_day())));
+}
+
+TEST_F(LogTest, StatsReportNoFailuresOnHealthyWrites) {
+  init_default();
+
+  log_info(LogChannel::kApp, "一");
+  log_kv(LogChannel::kApp, LogLevel::kInfo, "two", {{"n", "2"}});
+  log_text(LogChannel::kApp, LogLevel::kWarn, "三\n四");
+  log_block(LogChannel::kJudge, LogLevel::kDebug, "x.cpp", "int main() {}");
+  flush_log(LogChannel::kApp);
+
+  const LogStats stats = log_stats();
+  EXPECT_EQ(stats.failures[0], 0) << "写失败必须自己暴露，不能静默丢日志";
+  EXPECT_EQ(stats.failures[1], 0);
+  // written 计的是【条目】数（log_text 按行计），且每条即 flush，实现要点 5
+  EXPECT_EQ(stats.written[0], static_cast<long>(read_lines(app_path()).size()));
+  EXPECT_EQ(stats.written[0], 4);  // 1 + 1 + 2 行
+  EXPECT_EQ(stats.written[1], 3);  // 空块的头/尾各一行 + 正文一行
 }
 
 TEST_F(LogTest, OversizedEntryIsTruncatedWithNotice) {

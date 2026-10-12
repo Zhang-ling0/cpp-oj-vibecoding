@@ -36,6 +36,30 @@ endif()
 
 add_compile_options(-Wall -Wextra)
 
+# ---- Sanitizer（可选，默认关闭）--------------------------------------------------
+# 用途：单测是唯一能自动复现"并发 + 文件切换 + 截断"这类问题的手段，
+#   而日志模块恰好三样都有（11 个写者、切割时 rename、按字节截断）。
+# 为什么放【根】文件而不是 tests/CMakeLists.txt：sanitizer 标志必须同时作用于
+#   ojcore 与测试目标，测试目标靠链接 ojcore 拿不到静态库内部代码的插桩 ——
+#   只插桩测试文件等于什么都没测。
+# 用法（已实测 83/83 通过）：
+#   ASAN_OPTIONS=detect_leaks=0 cmake -S . -B build-asan -DOJ_SANITIZE=address,undefined
+#   ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan --output-on-failure
+# ⚠️ 本机的三条限制，都是实测结论而不是猜测：
+#   ① LeakSanitizer 起不来（"LeakSanitizer has encountered a fatal error"，本机 ptrace
+#      受限），且它在 gtest_discover_tests 的构建期探测（--gtest_list_tests）就会挂，
+#      所以 detect_leaks=0 必须在【配置与构建】时就 export，不能只在跑 ctest 时给。
+#   ② 就算 LSan 能跑，log 模块也有一个【故意的】单例泄漏（见 log.cpp 文件头
+#      【实现要点】1：避免静态析构顺序问题），会被误报成泄漏 —— 别去"修"它。
+#   ③ thread（TSan）完全起不来（"unexpected memory mapping"），因此并发正确性
+#      目前靠 log_test.cpp 的压力断言（总条数 + 每行字段完整性）保证，而不是靠 TSan。
+set(OJ_SANITIZE "" CACHE STRING "Sanitizer 组合（address,undefined / thread），空=关闭")
+if(OJ_SANITIZE)
+  add_compile_options(-fsanitize=${OJ_SANITIZE} -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${OJ_SANITIZE})
+  message(STATUS "Sanitizer 已启用：${OJ_SANITIZE}（本机需配合 ASAN_OPTIONS=detect_leaks=0，见本文件注释）")
+endif()
+
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   message(WARNING
     "当前编译器是 ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}；"
