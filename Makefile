@@ -41,7 +41,7 @@ build: configure
 
 test: build
 	# --no-tests=error：ARGS 里的过滤串写错时，ctest 默认返回 0（看着像"全过"）
-	# 不加 -j：198 条用例串行才 18 秒，并发只会和构建/DB 抢 CPU 与内存（见文件头 JOBS 说明）
+	# 不加 -j：274 条用例串行才 30 秒，并发只会和构建/DB 抢 CPU 与内存（见文件头 JOBS 说明）
 	$(CTEST) --test-dir $(BUILD_DIR) --no-tests=error --output-on-failure $(ARGS)
 
 # T0.1：make run 负责拉起 mysqld（若未运行）+ 启动 ./oj

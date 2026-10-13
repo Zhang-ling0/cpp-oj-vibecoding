@@ -19,7 +19,7 @@
 |---|---|---|
 | 开发机 | Ubuntu 24.04，**2 核 / 1967MB** | §6.7、`[D-74]` 的下调依据 |
 | 可用内存 | mysqld 常驻后常只剩 **300MB 上下** | 实测 `free -m` |
-| 本项目规模 | `ojcore` 19 个翻译单元 + `oj` + 5 个 gtest 目标 | 根 `CMakeLists.txt` 的显式源列表 |
+| 本项目规模 | `ojcore` 22 个翻译单元 + `oj` + 7 个 gtest 目标 | 根 `CMakeLists.txt` 的显式源列表 |
 | 带 sanitizer 时 | 单个 TU 峰值内存显著更大（ASan 影子内存） | 实测 |
 
 ### 规则：**编译并发上限 = 2；带 sanitizer 时 = 1**
@@ -28,7 +28,7 @@
 |---|---|---|
 | 日常编译 | `make build` | Makefile 内部已固定 `cmake --build build -j2` |
 | 手写编译 | `cmake --build build -j2` | **不要**省略 `-j2`，也不要写 `-j`（=核数）或更大 |
-| 单测 | `make test` / `ctest --test-dir build` | ctest **不加 `-j`**：198 条串行 18 秒，并发只会与 DB/构建抢资源 |
+| 单测 | `make test` / `ctest --test-dir build` | ctest **不加 `-j`**：274 条串行 30 秒，并发只会与 DB/构建抢资源 |
 | ASan / UBSan | `cmake --build build-asan -j1` | 另需 `ASAN_OPTIONS=detect_leaks=0`（本机 LSan/TSan 受限，见根 `CMakeLists.txt` 注释） |
 | 只重新配置 | `cmake -S . -B build` | 无编译步骤，可随意并发 |
 | 临时降并发 | `make build JOBS=1` | 不必改 Makefile |
@@ -2512,6 +2512,16 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 - [ ] T3.4 限流器：每用户 60s 滑动窗口 + 同时评测数配额
 - [ ] T3.5 路由：§6.3 全部端点 + 统一包络 + 错误码映射
 - [ ] T3.6 列表查询：多条件筛选 + 分页 + JOIN 进度与收藏
+  - **已完成业务层 `include/web/problem_api.h` + `src/web/problem_api.cpp`**：`GET /api/problems`（keyword / difficulty / tags / progress / favorite / sort / page / size）、`GET /api/tags`、`GET /api/problems/{slug}` 三个端点的"算什么、要几条 SQL、失败时怎么退"，camelCase 契约由 `to_json()` 独家序列化。SQL 随业务层走而**不**进 `db/dao.h`，与 T3.12 同一取舍（dao.h 尚空，T3.2 落地时再把聚合语句收敛进 problem 组）
+  - **查询串解析是纯函数**（`parse_list_query` / `url_decode` / `validate_list_query`）：枚举值非法一律 1001 并指名 field（静默回退会让用户拿到"看起来筛了其实没筛"的列表）；未知参数名忽略；同名参数最后一个生效；`size` 超上限夹到 100（`kMaxPageSize`，封顶串行化 DB 上的单次大查询，响应回显实际生效值）
+  - **两条 SQL：一条 COUNT、一条取页，共用同一个 `append_where()`**。两条各写一套 WHERE 时，"总数 47 但第 3 页是空的"这种错不会崩、只会让分页器发疯
+  - **匿名语义只有一个值：`user_id = 0`**（`kAnonymousUserId`）。登录/未登录的 SQL 文本完全相同，只差一个参数 —— 少一半语句模板就没有"两套模板各自演化"的漂移面。⚠️ 依赖"匿名不得携带个人筛选"这条：`progress≠none` / `favorite=1` 在匿名时返回 **1001**（而不是静默忽略或返回空列表）
+  - **标签聚合 `JSON_ARRAYAGG` + `CASE WHEN t.id IS NULL THEN NULL ELSE ... END`**：LEFT JOIN 的空行会让 `JSON_ARRAYAGG(JSON_OBJECT('name', NULL,...))` 产出 `{"name":null}` 的假标签，而它不是 NULL 所以 COALESCE 兜不住（MySQL 的 JSON_ARRAYAGG 忽略 NULL 值，故用 CASE 把它整个变 NULL）。聚合组内顺序在 C++ 侧按 `(category, name)` 定死 —— `JSON_ARRAYAGG` 不支持 ORDER BY
+  - **`is_favorite` 必须写成 `COALESCE(MAX(up.favorite), 0)`**：`ONLY_FULL_GROUP_BY` 下 MySQL 只能从 `p.id` 推断 `p.*` 的函数依赖，推不出 `up.*`（实测报 1055）
+  - 标签筛选用**逐标签一个 EXISTS**（AND 语义 = 同时挂全部所选标签），不用 JOIN+DISTINCT：JOIN 会把题乘以标签数，`LIMIT/OFFSET` 就在乘完的结果上取，第 2 页直接漏题
+  - 关键词 LIKE 的 `% _ \` 全部转义并显式写 `ESCAPE`（用户搜 `100%` 时 `%` 必须当字面量）；四个排序方案都以 `p.id ASC` 收尾 —— 少一个稳定 tiebreaker，"翻页不重不漏"会偶发漏题
+  - **单测** `tests/problem_api_test.cpp` **63 条全绿**（纯逻辑 34 + 真库 29；连不上 MySQL 时真库组整体 `GTEST_SKIP`），`-DOJ_SANITIZE=address,undefined` 尚未重跑（本机 LSan 受限，见根 `CMakeLists.txt` 注释）
+  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，`common/response.h`/`errors.h` 未开工，`to_json()` 只产出 data 块）；② Cookie → 登录上下文（T3.3，`ViewerContext*` 由会话层递进来）；③ 收藏切换端点（`POST /api/problems/{slug}/favorite` 属 T4.9 的后端，本轮未做）
 - [ ] T3.7 提交端点：校验 → 落库 pending → 入队 → 返回 201
 - [ ] T3.8 提交详情端点：仅本人可见 + 按 §6.3 的三步组装 `caseResults` / `compileErrors`
   - `submission_case_results` 按 `case_idx ASC`；`submission_compile_errors` 按 `seq ASC`
@@ -2567,6 +2577,13 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **主标签 = 该题 algorithm 标签中通过率最低者** `D-68`；并列取 `tags.id` 最小（保证可复现）；**无 algorithm 标签的题不进候选集**
   - 候选集 = `progress ≠ 'solved'` 的题；**必须可解释** —— 返回值里带现成的理由文案字符串（与主标签同源，不会出现"说的标签和算分的标签不是同一个"）
   - 全部通过 → 返回 `null`（前端渲染完成度）；**未登录 → 字段整个不下发**
+  - **已完成（与 T3.6 同一模块，`include/web/problem_api.h`）**：两条 SQL（标签通过率 + 候选题及其 algorithm 标签）+ 一个**纯函数** `pick_recommendation()` 做决策
+  - **为什么拆成"取数 + 纯函数"**：`D-68` 的主标签是"先按题聚合、再在标签间取极值"的两层比较，写成 SQL 要么套窗口函数要么自连接；而 AC-46 要求**连跑 5 次同一输入得同一题**，这种可复现性放在可直接单测的纯函数里最容易保证
+  - **打分比较用整数交叉相乘**（`(tA-sA)*tB < (tB-sB)*tA`），不用 double —— 否则"本该并列却不相等"的抖动会让同分 tie-break 变成不可复现。`score` 只留在结构体里供核对，不参与决策
+  - 同分 tie-break 在 SPEC 的 `difficulty → sort_no` 之后**补了 `id ASC`**：前两者都可能重复，没有最后一层兜底时结果仍取决于输入顺序（单测 `IsReproducibleForTheSameInput` 每轮打乱候选顺序来钉这一条）
+  - 理由文案用**算分时选中的那个标签**的通过率拼装（`「链表」标签你通过 2/5，本题尚未通过`）—— 顺序反过来就会出现"理由说的和算的不是同一个"（AC-34）
+  - 候选集为空有**两种**情形（全部通过 / 题库里没有 algorithm 标签），都序列化为 `nextRecommendation: null`；**未登录是第三种**：字段整个不下发（AC-25 / T4.22 整张卡不渲染）。三种形状各自有单测
+  - 推荐查询失败**不让整个详情端点失败**（宁可少一张卡，也不要用户在读题时看到 1008），但错误仍进 `app.log`
 - [ ] T3.18 注销账号端点 `[D-56] [D-57] [D-70]`
   - `DELETE /api/auth/account {password}`：验密码 → 1001/field=password
   - 成功路径**只有一条 SQL**：`DELETE FROM users WHERE id=?`，靠两级 CASCADE 完成（§3.6）
@@ -2575,6 +2592,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - 走同一个全局 `DB mutex`；清当前 Cookie
 - [ ] T3.19 题库加载器支持 `hint_md` `[D-47]`
   - 字段映射表补一行（§4.1）；缺省 `NULL` 而非空串（两者语义不同，前者"不渲染 tab"，后者"渲染空 tab"）
+  - **写侧早已由 T1.2 的加载器落地**（`loader.cpp` 落库 NULL、`json_schema.cpp` 缺省/空串都映射为 NULL）；**读侧由 T3.6 的详情端点下发**：JSON 键名照抄 §6.3 端点表的拼写 `hint_md`（**snake，与相邻 camelCase 字段不同名** —— 改成 `hintMd` 要同步改 T4.20 与 AC-26），值为 `null` 即"不渲染提示 tab"（T4.20）
 - [ ] **验收**：六个新端点 `curl` 全通；`canRetry` 逻辑正确；`queueAhead` 在单任务时恒为 0
 
 ### M4 — 前端（Day 14–17）
