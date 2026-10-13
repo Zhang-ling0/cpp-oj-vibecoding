@@ -57,19 +57,24 @@ const char* level_tag(LogLevel level) {
 // ---- 时间 ---------------------------------------------------------------------
 // 时钟覆盖值：> 0 时所有格式化都用它（单测用），<= 0 用真实时钟
 std::int64_t g_clock_override = 0;
+int g_clock_override_millis = 0;
 
-std::int64_t now_epoch_seconds() {
-  if (g_clock_override > 0) return g_clock_override;
-  return std::chrono::duration_cast<std::chrono::seconds>(
-             std::chrono::system_clock::now().time_since_epoch())
-      .count();
-}
+// 一次 clock_gettime 同时给出秒与毫秒。
+// ⚠️ 刻意【不】拆成 now_epoch_seconds() + now_millis() 两个函数：拆开就意味着
+//    两处各自调一次时钟，而在秒边界上这两次会落在不同的秒里 —— 拼出来的前缀会是
+//    "23:59:59.007"，而这一行实际发生在次日 00:00:00。症状是每晚最多一条日志行的
+//    日期归属差一天，且【行时间戳与所在文件的日期不一致】，排障时极难解释。
+//    同理，行前缀与切割判据也必须用【同一次】取到的值（见 entry → write_line）。
+struct WallClock {
+  std::int64_t seconds = 0;
+  int millis = 0;
+};
 
-int now_millis() {
-  if (g_clock_override > 0) return 0;
+WallClock now_wall() {
+  if (g_clock_override > 0) return WallClock{g_clock_override, g_clock_override_millis};
   timespec ts{};
-  ::clock_gettime(CLOCK_REALTIME, &ts);
-  return static_cast<int>(ts.tv_nsec / 1000000);
+  ::clock_gettime(CLOCK_REALTIME, &ts);  // 单次读取：秒与纳秒同时取到
+  return WallClock{ts.tv_sec, static_cast<int>(ts.tv_nsec / 1000000)};
 }
 
 std::tm local_tm(std::int64_t epoch_seconds) {
@@ -106,22 +111,37 @@ long long days_from_civil(int y, unsigned m, unsigned d) {
   return era * 146097 + static_cast<long long>(doe) - 719468;
 }
 
-long long date_to_index(const std::string& yyyymmdd) {
-  if (yyyymmdd.size() != 10) return 0;
-  if (yyyymmdd[4] != '-' || yyyymmdd[7] != '-') return 0;
-  for (std::size_t i = 0; i < yyyymmdd.size(); ++i) {
+// 把 "<YYYY-MM-DD>" 或 "<YYYY-MM-DD>.<序号>" 解析成天序号；不是这两种形状返回 -1。
+//   为什么必须收下"<日期>.<序号>"：rotate_if_needed 在归档名撞名时会追加序号
+//   （app.log.2026-10-12.1），而那些文件【与不带序号的同日期文件保留期完全相同】。
+//   早先这里只认长度 10，于是带序号的名字被判成"不是本模块的切割文件"而
+//   永远留在磁盘上 —— 每天多一个垃圾文件，且 ./logs 只会涨不会消。
+//   判 -1 而不是 0 作"非法"哨兵：0 是 1970-01-01 这个【合法日期】的天序号，
+//   用它当哨兵会让恰好以 1970-01-01 命名的过期文件逃过清理。
+long long date_to_index(const std::string& suffix) {
+  if (suffix.size() < 10) return -1;
+  if (suffix[4] != '-' || suffix[7] != '-') return -1;
+  for (std::size_t i = 0; i < 10; ++i) {
     if (i == 4 || i == 7) continue;
-    if (yyyymmdd[i] < '0' || yyyymmdd[i] > '9') return 0;
+    if (suffix[i] < '0' || suffix[i] > '9') return -1;
   }
-  const int y = std::atoi(yyyymmdd.substr(0, 4).c_str());
-  const unsigned m = static_cast<unsigned>(std::atoi(yyyymmdd.substr(5, 2).c_str()));
-  const unsigned d = static_cast<unsigned>(std::atoi(yyyymmdd.substr(8, 2).c_str()));
-  if (m < 1 || m > 12 || d < 1 || d > 31) return 0;
+  // 第 11 个字符起只能是 "." + 【至少一位】全数字（rotate 生成的序号形如 ".1"/".999"）。
+  // 单独一个 "." 不收：它不是本模块可能产生的形状，放它进来只会让清理动到别人的文件
+  if (suffix.size() > 10) {
+    if (suffix.size() < 12 || suffix[10] != '.') return -1;
+    for (std::size_t i = 11; i < suffix.size(); ++i) {
+      if (suffix[i] < '0' || suffix[i] > '9') return -1;
+    }
+  }
+  const int y = std::atoi(suffix.substr(0, 4).c_str());
+  const unsigned m = static_cast<unsigned>(std::atoi(suffix.substr(5, 2).c_str()));
+  const unsigned d = static_cast<unsigned>(std::atoi(suffix.substr(8, 2).c_str()));
+  if (m < 1 || m > 12 || d < 1 || d > 31) return -1;
   return days_from_civil(y, m, d);
 }
 
 long today_index() {
-  const std::tm tm_value = local_tm(now_epoch_seconds());
+  const std::tm tm_value = local_tm(now_wall().seconds);
   return days_from_civil(tm_value.tm_year + 1900,
                          static_cast<unsigned>(tm_value.tm_mon + 1),
                          static_cast<unsigned>(tm_value.tm_mday));
@@ -319,7 +339,7 @@ std::size_t sweep_retention(std::size_t index, int keep_days) {
     if (name.compare(0, prefix.size(), prefix) != 0) continue;
     const std::string suffix = name.substr(prefix.size());
     const long file_index = date_to_index(suffix);
-    if (file_index == 0) continue;  // 后缀不是合法日期 → 不是本模块的切割文件
+    if (file_index < 0) continue;  // 后缀不是合法日期 → 不是本模块的切割文件
     if (file_index >= cutoff) continue;
     std::error_code rm_ec;
     std::filesystem::remove(entry_it.path(), rm_ec);
@@ -344,9 +364,12 @@ bool open_current(Channel& channel, const std::string& path, const std::string& 
 
 // 惰性切割：写入时发现日期变了才切。切换失败（改名冲突、目录只读）时
 // 【追加】回原文件而不是新建，代价只是这一天的内容跨了两天，不会丢数据。
-void rotate_if_needed(std::size_t index) {
+// stamp 由调用方传入（与该行的时间戳同源）：若这里自己再读一次时钟，行的
+// 时间戳与它被写进哪个文件就可能来自两个不同的"现在" —— 症状是某行带着前一天
+// 的日期戳却出现在今天的文件里，且这种不一致每晚只出现一次，极难复现。
+void rotate_if_needed(std::size_t index, WallClock stamp) {
   Channel& channel = state().channels[index];
-  const std::string today = format_date(now_epoch_seconds());
+  const std::string today = format_date(stamp.seconds);
   if (channel.date == today) return;
   if (!channel.opened) return;
 
@@ -378,8 +401,8 @@ void rotate_if_needed(std::size_t index) {
 
 // ---- 落盘 ----------------------------------------------------------------------
 // 前缀已由调用方算好（含时间戳），这里只负责"写到哪去"。
-void write_line(std::size_t index, const std::string& prefix, const std::string& body,
-                bool mirror) {
+void write_line(std::size_t index, WallClock stamp, const std::string& prefix,
+                const std::string& body, bool mirror) {
   State& s = state();
   Channel& channel = s.channels[index];
   if (!s.initialized || !channel.opened) {
@@ -393,7 +416,7 @@ void write_line(std::size_t index, const std::string& prefix, const std::string&
     return;
   }
 
-  rotate_if_needed(index);
+  rotate_if_needed(index, stamp);
   if (!channel.opened) {  // 本次切割失败
     std::fputs((prefix + body + "\n").c_str(), stderr);
     return;
@@ -407,8 +430,8 @@ void write_line(std::size_t index, const std::string& prefix, const std::string&
   if (mirror) std::fputs((prefix + body + "\n").c_str(), stderr);
 }
 
-std::string build_prefix(LogChannel channel, LogLevel level) {
-  return format_timestamp(now_epoch_seconds(), now_millis()) + " " +
+std::string build_prefix(LogChannel channel, LogLevel level, WallClock stamp) {
+  return format_timestamp(stamp.seconds, stamp.millis) + " " +
          level_tag(level) + " [tid=" + std::to_string(thread_id()) + "] [" +
          kChannelTag[channel_index(channel)] + "] ";
 }
@@ -421,7 +444,9 @@ void entry(LogChannel channel, LogLevel level, const std::string& body) {
     ++s.channels[index].filtered;
     return;
   }
-  write_line(index, build_prefix(channel, level), body,
+  // 时钟只在【这里】取一次：这一个值同时决定行前缀与写哪个文件（见 now_wall 的注释）
+  const WallClock stamp = now_wall();
+  write_line(index, stamp, build_prefix(channel, level, stamp), body,
              s.console_mirror && channel == LogChannel::kApp);
 }
 
@@ -462,7 +487,7 @@ LogInitReport init_logging(const LogOptions& options) {
   s.console_mirror = options.console_mirror;
   s.initialized = false;  // 逐个通道打开，全部成功才置 true
 
-  const std::string today = format_date(now_epoch_seconds());
+  const std::string today = format_date(now_wall().seconds);
   bool all_ok = true;
   for (int i = 0; i < kLogChannelCount; ++i) {
     const LogChannel channel = static_cast<LogChannel>(i);
@@ -653,9 +678,17 @@ void log_test_reset() {
   g_clock_override = 0;
 }
 
-void log_test_set_time(std::int64_t epoch_seconds) { g_clock_override = epoch_seconds; }
+void log_test_set_time(std::int64_t epoch_seconds) {
+  g_clock_override = epoch_seconds;
+  g_clock_override_millis = 0;
+}
 
-std::string log_today() { return format_date(now_epoch_seconds()); }
+void log_test_set_time(std::int64_t epoch_seconds, int millis) {
+  g_clock_override = epoch_seconds;
+  g_clock_override_millis = millis < 0 ? 0 : (millis > 999 ? 999 : millis);
+}
+
+std::string log_today() { return format_date(now_wall().seconds); }
 
 }  // namespace common
 }  // namespace oj

@@ -275,6 +275,45 @@ TEST_F(LogTest, EveryLineCarriesFullPrefix) {
             "服务启动");
 }
 
+// 秒与毫秒必须来自【同一次】时钟读取。
+// 这条用例的判别力在于：早先 now_millis() 在"时钟被覆盖"时返回 0，于是毫秒被吞成
+// ".000"，也就把"两次独立读取"这件事藏了起来 —— 真实时钟下它只在秒边界那一瞬
+// 发生（每晚最多一行），单靠实跑永远撞不上。给出可冻结的毫秒值，这条不变量才测得到。
+TEST_F(LogTest, TimestampSecondsAndMillisComeFromOneClockRead) {
+  init_default();
+  // 注意用 local_epoch(...,23,59)+59 而不是 base_day()+86399：base_day() 的小时是 12
+  // （测试基线刻意避开 0 点，见 local_epoch 的默认参数），直接加一天会落到次日中午
+  log_test_set_time(local_epoch(kYear, kMonth, kDay, 23, 59) + 59, 500);
+
+  log_info(LogChannel::kApp, "边界前");
+
+  const std::vector<std::string> lines = read_lines(app_path());
+  ASSERT_EQ(lines.size(), 1u);
+  EXPECT_TRUE(starts_with(lines[0], date_of(base_day()) + " 23:59:59.500 ")) << lines[0];
+}
+
+// 跨天那一刻，行时间戳的日期必须与它【所在文件】的日期一致。
+// 割裂的写法（行前缀读一次时钟、切割判据再读一次）会让这一行出现
+// "带着前一天的日期戳、却写进了当天的文件" —— 每晚一行，肉眼几乎看不出来。
+TEST_F(LogTest, LineStampAndItsFileDateNeverDisagreeAcrossMidnight) {
+  init_default();
+  log_test_set_time(local_epoch(kYear, kMonth, kDay, 23, 59) + 59, 999);
+  log_info(LogChannel::kApp, "午夜前最后一条");
+  log_test_set_time(local_epoch(kYear, kMonth, kDay + 1, 0, 0), 1);
+  log_info(LogChannel::kApp, "午夜后第一条");
+
+  const std::string day1 = date_of(base_day());
+  const std::string day2 = date_of(day_offset(1));
+  ASSERT_TRUE(fs::exists(app_path() + "." + day1));
+  const std::vector<std::string> archived = read_lines(app_path() + "." + day1);
+  ASSERT_EQ(archived.size(), 1u);
+  EXPECT_TRUE(starts_with(archived[0], day1 + " 23:59:59.999 ")) << archived[0];
+
+  const std::vector<std::string> current = read_lines(app_path());
+  ASSERT_EQ(current.size(), 1u);
+  EXPECT_TRUE(starts_with(current[0], day2 + " 00:00:00.001 ")) << current[0];
+}
+
 TEST_F(LogTest, NewlineInSingleLineApiIsEscaped) {
   init_default();
 
@@ -639,6 +678,51 @@ TEST_F(LogTest, RetentionBoundaryKeepsExactlyNDates) {
   EXPECT_TRUE(fs::exists(dir_ + "/app.log." + oldest_kept)) << "7 天 = 今天 + 前 6 天";
   EXPECT_FALSE(fs::exists(dir_ + "/app.log." + oldest_gone));
   EXPECT_EQ(report.deleted_rotated_files, 1u);
+}
+
+// 带序号的归档名（app.log.<日期>.<N>）与不带序号的是【同一个日期的同一种文件】，
+// 保留期必须一视同仁。早先解析器只认长度 10 的后缀，于是这些文件被判成"不是本模块
+// 的切割文件"而永远留着 —— ./logs 只涨不消，且没人知道多出来的是什么。
+// 触发条件很普通：同一天里进程重启后又跨天切割一次（RotationNeverOverwritesExistingHistory）。
+TEST_F(LogTest, RetentionAlsoDeletesSequenceSuffixedRotatedFiles) {
+  const std::string expired = date_of(day_offset(-8));
+  const std::string kept = date_of(day_offset(-3));
+  touch("app.log." + expired, "过期不带序号");
+  touch("app.log." + expired + ".1", "过期带序号");
+  touch("app.log." + expired + ".27", "过期带多位数序号");
+  touch("judge.log." + expired + ".2", "过期带序号的 judge");
+  touch("app.log." + kept + ".1", "还在保留期内的带序号");
+  // 形状不合法的一律不动：序号必须是纯数字，否则"认日期"会退化成"猜"
+  touch("app.log." + expired + ".x", "序号不是数字");
+  touch("app.log." + expired + ".", "序号为空");
+  touch("app.log." + expired + "x", "日期后多了个字符");
+  touch("app.log.2026-13-40.1", "日期本身非法");
+
+  const LogInitReport report = init_default();
+
+  EXPECT_EQ(report.deleted_rotated_files, 4u);
+  EXPECT_FALSE(fs::exists(dir_ + "/app.log." + expired));
+  EXPECT_FALSE(fs::exists(dir_ + "/app.log." + expired + ".1"));
+  EXPECT_FALSE(fs::exists(dir_ + "/app.log." + expired + ".27"));
+  EXPECT_FALSE(fs::exists(dir_ + "/judge.log." + expired + ".2"));
+  EXPECT_TRUE(fs::exists(dir_ + "/app.log." + kept + ".1")) << "带序号不等于超期";
+  EXPECT_TRUE(fs::exists(dir_ + "/app.log." + expired + ".x"));
+  EXPECT_TRUE(fs::exists(dir_ + "/app.log." + expired + "."));
+  EXPECT_TRUE(fs::exists(dir_ + "/app.log." + expired + "x"));
+  EXPECT_TRUE(fs::exists(dir_ + "/app.log.2026-13-40.1"));
+}
+
+// 1970-01-01 的天序号恰好是 0。早先用 0 当"非法"哨兵，于是这个日期的过期文件
+// 与非法后缀一起被跳过 —— 一个真实存在的文件被当成"不认识的东西"留在磁盘上。
+TEST_F(LogTest, RetentionDeletesFilesDatedTheEpochItself) {
+  const std::int64_t epoch = 0;  // 1970-01-01 00:00:00 本地
+  ASSERT_EQ(date_of(epoch), std::string("1970-01-01"));
+  touch("app.log." + date_of(epoch), "1970 年的日志");
+
+  const LogInitReport report = init_default();
+
+  EXPECT_EQ(report.deleted_rotated_files, 1u);
+  EXPECT_FALSE(fs::exists(dir_ + "/app.log.1970-01-01"));
 }
 
 TEST_F(LogTest, RetentionZeroKeepsOnlyToday) {

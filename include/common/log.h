@@ -177,7 +177,10 @@ std::string log_current_date(LogChannel channel);
 // ---- 单测专用（与 config::reset_config() 同一性质）----------------------------
 void log_test_reset();
 // <= 0 恢复真实时钟；用于在不真的等一天的情况下验证切割与保留期清理
+// 仅供单元测试：覆盖时钟。millis 参数可选（默认 0），存在是为了让"秒与毫秒同源"
+// 这条不变量可被单测钉住 —— 只给秒的话，毫秒写死 0，"同一次读取"无从验证。
 void log_test_set_time(std::int64_t epoch_seconds);
+void log_test_set_time(std::int64_t epoch_seconds, int millis);
 // 当前（可能被覆盖的）本地日期 YYYY-MM-DD
 std::string log_today();
 

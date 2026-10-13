@@ -135,6 +135,7 @@ set(OJCORE_SOURCES
     src/judge/runner.cpp
     src/judge/scheduler.cpp
     src/judge/worker.cpp
+    src/judge/workspace.cpp
     src/model/problem.cpp
     src/model/submission.cpp
     src/model/user.cpp

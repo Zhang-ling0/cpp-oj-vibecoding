@@ -2435,7 +2435,13 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
   - **已完成 `config.h`/`.env` 部分**：`tests/config_test.cpp` 45 条单测全绿
-  - **已完成 `log.h` 部分**：`tests/log_test.cpp` 38 条单测全绿，覆盖 `[D-34]` 双文件隔离、按天切割（含改名失败降级）、保留 N 天清理（只删本模块形状的文件）、行不变量与 UTF-8 安全截断、11 个并发写者；`-DOJ_SANITIZE=address,undefined` 下同样全绿（本机 LSan/TSan 受限，见 CMakeLists 注释）
+  - **已完成 `log.h` 部分**：`tests/log_test.cpp` 42 条单测全绿，覆盖 `[D-34]` 双文件隔离、按天切割（含改名失败降级）、保留 N 天清理（只删本模块形状的文件）、行不变量与 UTF-8 安全截断、11 个并发写者；`-DOJ_SANITIZE=address,undefined` 下同样全绿（本机 LSan/TSan 受限，见 CMakeLists 注释）
+    - **修掉两处跨天边界缺陷**（均为单测可判别的确定性问题，不靠实跑撞运气）：
+      ① **秒与毫秒必须来自同一次时钟读取**：早先是 `now_epoch_seconds()` 与 `now_millis()` 两次独立读时钟，秒边界上会拼出 `23:59:59.007` 这种"秒取自 T、毫秒取自 T+1"的行 —— 症状是每晚至多一行带着前一天的日期戳却写进当天的文件。现在统一为 `now_wall()` 一次 `clock_gettime` 返回 `{seconds, millis}`，且**行前缀与切割判据共用这同一个值**（`entry → write_line → rotate_if_needed` 一路传下去），否则仍会出现"行时间戳与所在文件日期不一致"
+      ② **保留期清理必须认带序号的归档名**：切割时同名冲突会追加序号（`app.log.2026-10-12.1`），而解析器只接受长度 10 的后缀，于是这些文件被判成"不是本模块的切割文件"而**永远留着**，日志目录只涨不消。现按 `<日期>` 与 `<日期>.<数字>` 两种形状解析（序号必须至少一位且全为数字，`app.log.<日期>.` 与 `.x` 仍不动）；另把"非法"哨兵从 `0` 改为 `-1`，因为 `0` 是 1970-01-01 这个合法日期的天序号，用它当哨兵会让那个日期的过期文件逃过清理
+      - 判别力已实测：把两处修复各自退回后，`TimestampSecondsAndMillisComeFromOneClockRead` / `LineStampAndItsFileDateNeverDisagreeAcrossMidnight` / `RetentionAlsoDeletesSequenceSuffixedRotatedFiles` 三条立即变红
+      - 为此给 `log_test_set_time()` 加了可选的 `millis` 参数：早先覆盖时钟时毫秒被写死 0，等于把"两次读取"这件事藏了起来，真实时钟下它只在秒边界那一瞬发生（每晚一行），不给出可冻结的毫秒值就无从单测
+    - **回归**：`ctest --test-dir build` **320/320 通过**；`-DOJ_SANITIZE=address,undefined` 下同样 **320/320 通过**（构建 `-j1`）
   - `response.h`/`errors.h` 尚未开工，故本条**不勾选**
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
 - [ ] T0.6 **vendored 前端库接入** `[D-73]`
@@ -2504,7 +2510,20 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 - [ ] T2.6 结果比较器：trim、数组空白归一、浮点容差
 - [ ] T2.7 `judge/queue.h` + `scheduler.h`：内存 FIFO + 4 worker 条件变量 + 并发闸门
 - [ ] T2.8 启动恢复逻辑（§5.7 的两条 SQL）
-- [ ] T2.9 工作目录生命周期：创建/清理/启动时扫残
+- [√] T2.9 工作目录生命周期：创建/清理/启动时扫残
+  - **已完成 `include/judge/workspace.h` + `src/judge/workspace.cpp`**：`workspace_paths()`（拼路径，纯函数）/ `create_workspace()` / `remove_workspace()` / `sweep_workspace()` 四个入口，文件名常量取自 `judge/compiler.h` 不另抄一份
+  - **已接线**：`main()` 把它排在题库同步之后、judge 调度器之前（§5.2 末句"服务启动时先扫描 `/tmp/oj-judge/*` 清空残留"），失败只 `WARN` 不拒绝启动 —— 清不掉垃圾目录不影响判题，而"起不来"比"留个目录"更糟。实测：造 `999`/`1000`/`manual-thing` 三个残留，重启后删掉前两个、`manual-thing` 只点名保留
+  - **三条不可协商的删除纪律**（每条都有对应用例）：① **只删 `<root>/<纯数字>`**，形状不符的条目只记名不删 —— §5.2 的"残留"指的是我们自己留下的，对别的形状动手删掉的可能是别人正在用的东西，且不可恢复；② **递归删除用 `nftw(FTW_DEPTH|FTW_PHYS)` + `unlink`，绝不跟随符号链接** —— 否则工作区里一个指向 `/etc` 的链接会把 `/etc` 当子树清空，这是递归删目录最经典的事故形状而平时测不出来；③ **形状校验用字符串比较而非 `realpath`** —— `realpath` 会把链接解析成真路径，于是 `/tmp/oj-judge/42 -> /etc` 反而"通过校验"，恰好是它要防的事
+  - **权限用 0700**：工作区里放着用户源码与编译产物，同机其他本地用户连 `ls` 都不该做得到。注意它**不替代** §5.4 的 `setrlimit` —— 那是拦用户代码去读别人的文件，0700 是反过来保护用户自己的代码
+  - **`remove_workspace` 幂等**（已不存在即返回 true）：worker 的清理在 `finally` 里调用，而"上一轮已经删过"与"这轮没建过"都不该算失败
+  - **扫残没有"新旧"概念**，因此**必须在 judge 启动之前跑**：worker 正在编译时目录被删，表现为随机的 CE/JE 且极难复现。用例 `SweepHasNoNotionOfFreshness` 把这条前置条件固化成文档
+  - **单测** `tests/workspace_test.cpp` **22 条全绿**（路径拼装 3 + 根目录取值 1 + 创建 5 + 删除 7 + 扫残 4 + 并发 1 + 收尾 1）。全部真跑文件系统：`mkdtemp` 出 `/tmp/ojws-XXXXXX`，`TearDown` 整棵删 —— 这批用例的价值全在删除纪律上，而那三条一旦写错，mock 掉的正是最危险的那一层（递归遍历 + `unlink`/`rmdir` 的真实语义）
+    - **并发用例是必需的而非凑数**：judge worker 是多线程（§2.3 × 2），"两个线程各自建/删各自的工作区"是真实并发形态。8 线程各跑一遍创建 → 写入 → 删除，收尾再扫一次残 —— `removed` 必须是 0，因为"漏删"在生产里不是浪费磁盘，而是下一次启动扫残时会被一起清掉
+    - **顺序无关性已实测**：`--gtest_shuffle --gtest_repeat=3` 三轮全绿（用例之间唯一共享的是 `root_`，每轮由 `SetUp` 重建）
+    - **不碰 MySQL**，因此这批用例在没起 mysqld 的机器上照跑不误
+  - **回归**：`ctest --test-dir build` **316/316 通过**（`TEST_F` 逐条注册成 ctest 用例，本模块占 24 条）；`-DOJ_SANITIZE=address,undefined` 下同样 **316/316 通过**（`ASAN_OPTIONS=detect_leaks=0`，sanitizer 构建按 §0.0 用 `-j1`）
+    - 唯一跳过的是 `LoaderTest.DatabaseFailureRollsBackThatProblemAndFailsTheReport` —— MySQL 账号缺 `SUPER` 建不了触发器，**与本模块无关，且是基线既有状态**
+  - 尚未接线：`worker` 的"创建 → 编译 → 清理"三步属 **T2.7**；本模块 `user.cpp` 的写入方是生成器（T1.5），它把内容写进 `create_workspace()` 返回的路径即可
 - [ ] T2.10 judge 日志：`/var/log/oj/judge.log` 记录生成代码、编译命令、进程退出原因
 - [ ] T2.11 写回事务：`UPDATE submissions`(四个汇总列 + status) + `INSERT` 用例行 + `INSERT` 诊断行必须同事务；失败则整条 submission 置 `failed`/`JE`
   - `status` 迁移与明细行必须同事务 —— §5.7 的恢复逻辑依赖此不变量（证明见该节注释）

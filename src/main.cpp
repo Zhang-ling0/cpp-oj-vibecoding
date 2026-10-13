@@ -7,7 +7,8 @@
 //   ✅ 3. 连接池就绪              —— init_from_config()，失败即拒绝启动（T3.1）
 //   ✅ 4. 幂等建表               —— 执行 db/init/01-schema.sql 并核对 11 张表（T0.3）
 //   ✅ 5. 题库同步               —— 读 problems/*.json → 校验 → 入库 → 灌只读缓存（T1.2）
-//   ⏳ 6. 角色同步（T3.11）→ 7. judge 调度器（T2.7）→ 8. listen（T0.5）
+//   ✅ 6. 工作区扫残             —— 清 /tmp/oj-judge/* 残留，必须排在 judge 之前（T2.9）
+//   ⏳ 7. 角色同步（T3.11）→ 8. judge 调度器（T2.7）→ 9. listen（T0.5）
 //   后三步都还没接线，因此本次进程在同步完题库、回显完配置后即退出。
 //
 // 【为什么每一步失败都直接退出，而不是打个 WARNING 继续】
@@ -37,6 +38,7 @@
 #include "common/config.h"
 #include "common/log.h"
 #include "db/mysql_pool.h"
+#include "judge/workspace.h"
 #include "problem/loader.h"
 
 namespace {
@@ -244,12 +246,37 @@ int main(int argc, char** argv) {
                 load_report.skipped);
   }
 
+  // ---- 6. 工作区扫残（T2.9 / §5.2 末句）----
+  // 排在 judge 调度器启动【之前】是硬要求：worker 正在编译时目录被删，表现为随机的
+  // CE/JE 且极难复现（judge/workspace.h【调用时机】）。现在 judge 还没接线，正是
+  // 该做的时机 —— 等接线后这一步的顺序就没有"看起来可以挪一挪"的余地了。
+  // 失败只 WARN 不拒绝启动：清不掉残留目录不影响判题，而"起不来"比"留个垃圾目录"更糟。
+  // 汇总与逐条原因分两条记：log.h 的行不变量要求每行自带前缀，多行文本必须走
+  // log_text —— 把 \n 塞进 log_info 的单行里，日志里会出现一行没有前缀的字面 \n。
+  const oj::judge::SweepReport sweep = oj::judge::sweep_workspace(oj::judge::workspace_root());
+  if (sweep.failed > 0) {
+    oj::common::log_warn(oj::common::LogChannel::kApp,
+                         sweep.summary() + "；残留目录将留到下次启动再清");
+  } else if (sweep.removed > 0 || sweep.skipped > 0) {
+    oj::common::log_info(oj::common::LogChannel::kApp,
+                         sweep.summary() + "（上次进程被 kill -9 留下的工作区，§5.2）");
+  }
+  if (!sweep.notes.empty()) {
+    oj::common::log_text(oj::common::LogChannel::kApp,
+                         sweep.failed > 0 ? oj::common::LogLevel::kWarn
+                                          : oj::common::LogLevel::kInfo,
+                         "工作区扫残逐条：\n" + sweep.notes);
+  }
+  if (!sweep.notes.empty()) std::printf("[oj] %s\n", sweep.notes.c_str());
+
   // ---- 启动回显 ----
   const std::string config_echo = oj::common::dump_config();
   std::printf("\n%s\n", config_echo.c_str());
   std::printf("\n[oj] 数据库就绪：%s\n",
               oj::db::Pool::instance().describe().c_str());
   std::printf("%s\n", load_report.summary().c_str());
+  std::printf("[oj] %s（根目录 %s）\n", sweep.summary().c_str(),
+              oj::judge::workspace_root().c_str());
   std::printf("[oj] 判题缓存已就绪：%zu 题。角色同步 / judge / HTTP 均待接线"
               "（T3.11 / T2.7 / T0.5），本次进程即将退出。\n",
               oj::problem::cache_size());
@@ -262,7 +289,8 @@ int main(int argc, char** argv) {
                        load_report.summary() + "；判题缓存 " +
                            std::to_string(oj::problem::cache_size()) + " 题");
   oj::common::log_info(oj::common::LogChannel::kApp,
-                       "启动顺序推进到「DB 就绪 + 建表完成 + 题库同步完成」，后续步骤待接线");
+                       "启动顺序推进到「DB 就绪 + 建表完成 + 题库同步完成 + 工作区扫残完成」，"
+                       "后续步骤待接线");
 
   oj::db::Pool::instance().shutdown();
   oj::common::shutdown_logging();
