@@ -30,8 +30,16 @@ foreach(test_source IN LISTS OJ_TEST_SOURCES)
 
   # 把每个 TEST_F 注册成一条 ctest 用例：`ctest -N` 能逐条列出，
   # `ctest -R Admin` 能按名字过滤，失败时输出该用例的完整日志。
+  #
+  # WORKING_DIRECTORY 必须指到【仓库根目录】而不是 build/：
+  #   ctest 默认把工作目录设为 CMAKE_CURRENT_BINARY_DIR（build/tests），
+  #   而本项目的若干约定是【相对当前工作目录】的 —— 题库 ./problems、.env、./logs
+  #   （§2.1-A 第 2 条、§6.7.3 都是这条前提）。于是 `LoaderWithoutPool` 这类用例
+  #   在 ctest 下会先因"找不到 ./problems"而失败，从项目根目录手动跑同一个二进制却通过
+  #   —— 绿色的手工结果与红色的 ctest 结果并存，最容易误判成"代码有问题"。
+  # 这里一次性对齐：让 ctest 与 `make run`、手动执行的工作目录完全一致。
   gtest_discover_tests(${test_name}
     DISCOVERY_TIMEOUT 60
-    PROPERTIES TIMEOUT 120
+    PROPERTIES TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   )
 endforeach()

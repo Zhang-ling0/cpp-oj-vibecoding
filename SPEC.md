@@ -9,6 +9,46 @@
 
 ---
 
+## ⚠️ 0.0 开发机硬约束（开工前必读，优先于本文档其余全部内容）
+
+> **这份约束的读者是"每次开新窗口的任何人/任何 agent"**，所以写在最前面而不是附录里。
+
+### 实测资源
+
+| 项 | 实测值 | 来源 |
+|---|---|---|
+| 开发机 | Ubuntu 24.04，**2 核 / 1967MB** | §6.7、`[D-74]` 的下调依据 |
+| 可用内存 | mysqld 常驻后常只剩 **300MB 上下** | 实测 `free -m` |
+| 本项目规模 | `ojcore` 19 个翻译单元 + `oj` + 5 个 gtest 目标 | 根 `CMakeLists.txt` 的显式源列表 |
+| 带 sanitizer 时 | 单个 TU 峰值内存显著更大（ASan 影子内存） | 实测 |
+
+### 规则：**编译并发上限 = 2；带 sanitizer 时 = 1**
+
+| 场景 | 命令 | 说明 |
+|---|---|---|
+| 日常编译 | `make build` | Makefile 内部已固定 `cmake --build build -j2` |
+| 手写编译 | `cmake --build build -j2` | **不要**省略 `-j2`，也不要写 `-j`（=核数）或更大 |
+| 单测 | `make test` / `ctest --test-dir build` | ctest **不加 `-j`**：198 条串行 18 秒，并发只会与 DB/构建抢资源 |
+| ASan / UBSan | `cmake --build build-asan -j1` | 另需 `ASAN_OPTIONS=detect_leaks=0`（本机 LSan/TSan 受限，见根 `CMakeLists.txt` 注释） |
+| 只重新配置 | `cmake -S . -B build` | 无编译步骤，可随意并发 |
+| 临时降并发 | `make build JOBS=1` | 不必改 Makefile |
+
+### 为什么不是"核数=2 所以 `-j2` 刚好"
+
+**卡住的不是 CPU，是内存。** 2 核实测下 `-j4` 尚可，但**带 sanitizer 的构建 `-j4` 会挂住**（表现为长时间无输出、最终超时），`-j1` 正常。原因是 ASan 的影子内存按进程翻倍，mysqld 常驻后 300MB 余量无法同时容纳 4 个被插桩的编译器进程 —— 表现是 swap 抖动或直接被 OOM killer 干掉，而现象是"构建卡死"，很容易被误判成"编译器有 bug"。
+
+> **这条与 `[D-74]`（worker 2 / 闸门 4）同源：都是按实测机器定，不是按通用经验定。** v1.0 假定 4G 机器时给的 `-j`、`worker 4`、`闸门 8` 全部偏大，落地到 2G 后被逐项下调；编译并发就是这一轮补上的最后一项。
+>
+> **症状 → 处置对照**（遇到时先查这张表，再查代码）：
+
+| 症状 | 最可能的原因 | 处置 |
+|---|---|---|
+| 构建长时间无输出 / 工具超时 | 并发过高（尤其 sanitizer） | 降到 `-j1`，重来 |
+| ctest 报"找不到 ./problems" | 工作目录不对 | ctest 已固定 `WORKING_DIRECTORY=仓库根`；手动跑测试要从仓库根执行 |
+| 单测大面积超时 | 与 `mysqld` / 构建并发抢资源 | 先让构建结束；测试不加 `-j` |
+
+---
+
 ## 0. 决策溯源
 
 本文档由 75 项访谈决策收敛而成。每条标注 `[D-xx]` 便于回溯与验收对照。
@@ -1923,6 +1963,8 @@ v1.4 三处引用了「主标签」却**从未定义怎么选** —— 一道题
 
 按**空白 Ubuntu 24.04** 口径给出。开发机实测 2 核 / 1967MB（`D-74` 的下调依据）。
 
+> ⚠️ **在这台机器上编译时，并发上限见 §0.0「开发机硬约束」：日常 `-j2`、sanitizer `-j1`。** 依赖装齐 ≠ 可以放开并发 —— 真正卡住的是内存而不是 CPU。
+
 #### 6.7.1 包清单（12 个必需）
 
 | 用途 | 包 | 版本 | 头文件 |
@@ -2369,10 +2411,14 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `make run` 负责拉起 `mysqld_safe`（若未运行）+ 启动 `build/oj`
   - **v1.8：`Makefile` 降为薄封装**，真实构建规则在 `CMakeLists.txt`（`ojcore` 静态库 + `oj` 可执行 + 测试开关）与 `tests/CMakeLists.txt`（GTest + `gtest_discover_tests`）
   - `make test` == `ctest --test-dir build --output-on-failure`，每个 `TEST_F` 是 ctest 里一条独立用例
+  - **编译并发固定 `-j2`、sanitizer 构建 `-j1`**（§0.0「开发机硬约束」）：`Makefile` 里 `JOBS ?= 2`，传 `JOBS=1` 可临时覆盖。**不要**改回 `-j` / `-j$(nproc)` —— 2G 内存下 sanitizer 并发会表现为"构建卡死"
+  - ctest 的 `WORKING_DIRECTORY` 固定为**仓库根**（`tests/CMakeLists.txt`）：本项目的 `./problems`、`.env`、`./logs` 都是相对当前工作目录的约定，ctest 默认用 `build/tests`，会让"手动跑通过、ctest 跑失败"
 - [√] T0.1.1 **CMake 构建规则** `[v1.8]`
   - 依赖全部 `find_package` / `find_path` 发现：Threads、OpenSSL(libcrypto)、nlohmann_json、mysqlclient、httplib、GTest
   - **httplib 双路径**：`/usr/local/include/httplib.h`（**0.60.1，版本真源**，v1.9）优先，缺失则 `WARNING` + 回退 `third_party/httplib`（0.14.3，版本不一致，视为环境未就绪），两者都没有才 `FATAL_ERROR`
   - **源文件用显式列表而非 GLOB**：漏加文件时报错，而不是静默不编译
+  - `gtest_discover_tests` 固定 `PROPERTIES TIMEOUT 120 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}`（超时防挂死；工作目录与 `make run` 对齐）
+  - **不在 CMake 里写死并发**（`CMAKE_BUILD_PARALLEL_LEVEL` 留给调用方）：并发上限是**机器属性**而非项目属性，写进构建系统就换台机器得改代码。约束落在 `Makefile` 的 `JOBS` 与 §0.0 的约定上
   - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
   - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
 - [ ] T0.2 【路线 B 可选】`Dockerfile` + `docker-compose.yml`：`ubuntu:22.04` 装 `g++-12`、MySQL Connector、cmake
@@ -2487,6 +2533,10 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `GET /api/admin/overview` 返回 `system` + `users[]`，`solved`/`attempted` 复用 §6.4 口径
   - **打通路由层 → scheduler 的访问路径**，否则 `queueLength`/`activeJudges`/`judgeAlive` 拿不到
   - **锁顺序**：先取 scheduler 快照并释放其锁，再取 `DB mutex` 查 DB；禁止 `DB mutex → scheduler lock` 嵌套
+  - **已完成业务层 `include/web/admin.h` + `src/web/admin.cpp`**：`require_admin()` 守卫、`load_system_counts()`/`load_users()` 两条聚合 SQL（全在 SQL 内、无 N+1）、`build_overview()`（**先取快照后取租约**，§6.3.3 实现约束 2 落地）、`to_json()`（camelCase 契约）。三个入口都做成"依赖外部递进来"（`AuthUser` / `StatusProvider` / `db::Session&`），接线时不必改本文件
+  - **单测** `tests/admin_test.cpp` **15 条全绿**（守卫顺序、JSON 字段契约、锁顺序、失败路径不变式 9 条纯逻辑 + 真库聚合 6 条；探针数据带 `ojadm` 前缀并在 `TearDown` 级联删净）。`-DOJ_SANITIZE=address,undefined` 下同样全绿
+  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，且 `common/response.h`/`errors.h` 未开工）；② Cookie → 登录用户（T3.3，`AuthUser` 由会话层递进来）；③ 运行态三项的真实来源（T2.7 调度器；当前 `unwired_status_provider()` **如实**返回 `judgeAlive=false`，不拿 DB 的 pending 行数冒充 `queueLength`）
+  - **两处口径是本轮定的、文档没写死的**（代码里各只需改一行，注释已标注）：`judgingCount` 取 `status IN ('pending','judging')`（只数 `judging` 会让 judge 未接线时排队中的提交在页面上彻底不可见）；`users[].solved` 与 `attempted` **不互斥**（`attempted` = 有过任意提交的题数，与 §6.5 的 `byDifficulty`/`byTag` 写法同源；单题粒度仍走 §6.4 的 `CASE`）
 - [ ] T3.13 改密码端点（§6.3.5）`[D-40]`
   - `POST /api/auth/password`：bcrypt `compare` 验旧密码 → 事务内 `UPDATE password_hash` + `DELETE FROM sessions WHERE user_id=? AND token<>?`
   - **`AND token <> ?` 保留当前会话是硬要求**（AC-21 专门验证）

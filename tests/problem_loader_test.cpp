@@ -661,7 +661,12 @@ TEST(LoaderWithoutPool, RefusesToWriteAndReportsWhy) {
   oj::db::Pool::instance().shutdown();   // 人为制造"池未就绪"
 
   LoadOptions options;
-  options.dir = "./problems";             // 目录内容无关紧要：它在碰 DB 之前就该退出
+  // 用 "." 而不是 "./problems"：本用例要验的是"池没就绪时拒绝写库并说明原因"，
+  // 而加载器的顺序是【先读目录、再碰 DB】。若这里写一个依赖当前工作目录的路径
+  // （如 ./problems），在 ctest 的工作目录（build/tests）下会先以"目录读不到"失败，
+  // 报出来的是另一条原因 —— 这个用例就测不到它想测的东西了。
+  // "." 恒存在（任何工作目录下都是），目录内容无关紧要。
+  options.dir = ".";
   const LoadReport report = oj::problem::load_all(options);
   EXPECT_FALSE(report.ok);
   ASSERT_FALSE(report.problems.empty());
