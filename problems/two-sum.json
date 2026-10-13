@@ -1,0 +1,36 @@
+{
+  "slug": "two-sum",
+  "title": "两数之和",
+  "difficulty": "medium",
+  "is_featured": true,
+  "sort_no": 10,
+  "tags": {
+    "algorithm": ["数组", "哈希表"],
+    "source": ["高频面试题"]
+  },
+  "statement_md": "## 题目描述\n\n给定一个整数数组 `nums` 和一个整数 `target`，找出数组中**和为目标值**的两个整数，返回它们的下标。\n\n你可以假设每种输入只对应一个答案，且同一个元素不能重复使用。\n\n### 示例 1\n\n```\n输入: nums = [2,7,11,15], target = 9\n输出: [0,1]\n解释: 因为 nums[0] + nums[1] == 9\n```\n\n### 示例 2\n\n```\n输入: nums = [3,2,4], target = 6\n输出: [1,2]\n```\n\n### 约束\n\n- `2 <= nums.length <= 10^4`\n- `-10^9 <= nums[i] <= 10^9`\n- 答案唯一，且两个下标不同",
+  "hint_md": "先想想要不要重复遍历数组：答案的下标之和要等于 `target`。试试**边遍历边记录已经见过的值 → 下标**，再回头找补数。",
+  "signature": "class Solution {\npublic:\n    std::vector<int> twoSum(std::vector<int>& nums, int target);\n};",
+  "method_name": "twoSum",
+  "params": [
+    { "name": "nums", "cpp_type": "std::vector<int>&" },
+    { "name": "target", "cpp_type": "int" }
+  ],
+  "return_type": "std::vector<int>",
+  "code_template": "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n    vector<int> twoSum(vector<int>& nums, int target) {\n        \n    }\n};",
+  "time_limit_ms": 3000,
+  "mem_limit_kb": 131072,
+  "harness_prelude": "",
+  "cases": [
+    {
+      "args": [[2, 7, 11, 15], 9],
+      "expected": [0, 1],
+      "brief": "基础用例"
+    },
+    {
+      "args": [[3, 2, 4], 6],
+      "expected": [1, 2],
+      "brief": "答案不在开头"
+    }
+  ]
+}

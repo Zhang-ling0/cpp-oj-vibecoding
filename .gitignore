@@ -1,5 +1,9 @@
 # 构建产物（CMake 的 build/，也是 compile_commands.json 的真身所在）
 build/
+# 变体构建树：CMakeLists.txt 顶部那段 ASAN 用法 `cmake -S . -B build-asan -DOJ_SANITIZE=...`
+# 产出的目录。上面 build/ 那条按【目录名】匹配，匹配不到 build-asan —— 不加这一条，
+# 跑一次 sanitizer 就多出几百个未跟踪的中间文件。
+build-*/
 
 # 运行日志：目录本身保留，内容忽略（SPEC §2.1-A 注 2 —— 不用 volume，直接是仓库内目录）
 # 两个模式缺一不可：logs/*.log 只匹配当前的 app.log / judge.log，

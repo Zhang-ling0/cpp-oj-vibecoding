@@ -6,8 +6,9 @@
 //   ✅ 2. init_logging()         —— 双文件按天切割（T0.4）
 //   ✅ 3. 连接池就绪              —— init_from_config()，失败即拒绝启动（T3.1）
 //   ✅ 4. 幂等建表               —— 执行 db/init/01-schema.sql 并核对 11 张表（T0.3）
-//   ⏳ 5. 题库同步（T1.2） → 6. 角色同步（T3.9） → 7. judge 调度器（T2.7） → 8. listen（T0.5）
-//   后四步都还没接线，因此本次进程在建完表、回显完配置后即退出。
+//   ✅ 5. 题库同步               —— 读 problems/*.json → 校验 → 入库 → 灌只读缓存（T1.2）
+//   ⏳ 6. 角色同步（T3.11）→ 7. judge 调度器（T2.7）→ 8. listen（T0.5）
+//   后三步都还没接线，因此本次进程在同步完题库、回显完配置后即退出。
 //
 // 【为什么每一步失败都直接退出，而不是打个 WARNING 继续】
 //   后面每一步都以前一步为地基：没有连接池，建表无处执行；没有表，题库同步无处落库；
@@ -19,6 +20,13 @@
 //   §2.1-A 第 1 条：路线 A 不走 /docker-entrypoint-initdb.d（那是容器机制），
 //   建表是【应用启动时幂等执行】的。因此它必须排在连接池之后、题库同步之前 ——
 //   题库同步要往 problem_cases / problem_params 里写行（§4.3）。
+//
+// 【题库同步失败为什么算致命，而"某几道题被跳过"不算】
+//   两者的性质不同，见 §5.6.1：
+//     · 目录读不到 / 表不存在 / 某道题写库失败 = 地基问题，继续跑会让 judge 拿着
+//       与 DB 不一致的题库判题，故拒绝启动；
+//     · 某道题校验不通过 = 题库自己的问题，决策明确要求"跳过该题、其余照常"，
+//       因此只打 ERROR + WARN，不阻止服务起来（50 道题里 1 道写错不该让服务起不来）。
 // =============================================================================
 #include <cstdio>
 #include <fstream>
@@ -29,6 +37,7 @@
 #include "common/config.h"
 #include "common/log.h"
 #include "db/mysql_pool.h"
+#include "problem/loader.h"
 
 namespace {
 
@@ -215,20 +224,45 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // ---- 5. 题库同步（T1.2 / §4.3）----
+  // 这一步做三件事：读目录 → 两层校验（json_schema）→ 单事务幂等入库 → 灌只读缓存。
+  // 被跳过的题已经由加载器逐条打进 app.log 的 ERROR，这里只把汇总打到 stdout，
+  // 因为"启动回显"是录题时最常看的一段（§4.3 第 5 步：按日志修正 JSON）。
+  oj::problem::LoadOptions load_options;
+  load_options.dir = oj::common::config().problems_dir;
+  const oj::problem::LoadReport load_report = oj::problem::load_all(load_options);
+  if (!load_report.ok) {
+    std::fprintf(stderr, "[oj] %s\n", load_report.format().c_str());
+    oj::common::log_error(oj::common::LogChannel::kApp,
+                          "题库同步失败，拒绝启动（详见 app.log 与上方 stderr）");
+    oj::db::Pool::instance().shutdown();
+    oj::common::shutdown_logging();
+    return 1;
+  }
+  if (load_report.skipped > 0) {
+    std::printf("[oj] 注意：%zu 道题被跳过（校验不通过），它们不会出现在列表页。逐条原因见 app.log。\n",
+                load_report.skipped);
+  }
+
   // ---- 启动回显 ----
   const std::string config_echo = oj::common::dump_config();
   std::printf("\n%s\n", config_echo.c_str());
   std::printf("\n[oj] 数据库就绪：%s\n",
               oj::db::Pool::instance().describe().c_str());
-  std::printf("[oj] 建表完成。题库同步 / 角色同步 / judge / HTTP 均待接线"
-              "（T1.2 / T3.9 / T2.7 / T0.5），本次进程即将退出。\n");
+  std::printf("%s\n", load_report.summary().c_str());
+  std::printf("[oj] 判题缓存已就绪：%zu 题。角色同步 / judge / HTTP 均待接线"
+              "（T3.11 / T2.7 / T0.5），本次进程即将退出。\n",
+              oj::problem::cache_size());
 
   oj::common::log_text(oj::common::LogChannel::kApp, oj::common::LogLevel::kInfo,
                        config_echo);
   oj::common::log_info(oj::common::LogChannel::kApp,
                        "数据库就绪 " + oj::db::Pool::instance().describe());
   oj::common::log_info(oj::common::LogChannel::kApp,
-                       "启动顺序推进到「DB 就绪 + 建表完成」，后续步骤待接线");
+                       load_report.summary() + "；判题缓存 " +
+                           std::to_string(oj::problem::cache_size()) + " 题");
+  oj::common::log_info(oj::common::LogChannel::kApp,
+                       "启动顺序推进到「DB 就绪 + 建表完成 + 题库同步完成」，后续步骤待接线");
 
   oj::db::Pool::instance().shutdown();
   oj::common::shutdown_logging();
