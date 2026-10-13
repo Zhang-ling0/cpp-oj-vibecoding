@@ -2463,10 +2463,30 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 
 ### M2 — 判题引擎（Day 7–10）
 
-- [ ] T2.1 `judge/compiler.h`：`alarm` 超时 + 两阶段编译 + 输出捕获
+- [√] T2.1 `judge/compiler.h`：`alarm` 超时 + 两阶段编译 + 输出捕获
+  - **已完成 `include/judge/compiler.h` + `src/judge/compiler.cpp`**：`compile_submission()` 依次跑 §5.2 的两条命令（`g++-12 -std=c++17 -O2 -Wall -c user.cpp -o user.o` → `g++-12 -std=c++17 -O2 user.o tester.cpp -o run`），任一阶段失败**立即返回**不做第二阶段；返回体是 `{ok, stage, timed_out, exit_code, output, diagnostics, commands, user_object_created, binary_created}`
+  - **spawn 与回收只有一个函数 `run_command()`**，两阶段只差 argv：超时/截断/进程组 kill 的逻辑写两遍就会在不同时期各自演化 —— 那正是 §8.1.1 说的"两处各自合理的设计放在一起就矛盾"的形状
+  - **超时 = `alarm()` + 墙钟双判，两者都走 `kill(-pgid, SIGKILL)`**。handler 只置 `volatile sig_atomic_t` 标志、不做系统调用（信号处理函数里调 `kill`/`waitpid` 都非异步信号安全，且出错只会更难查）；墙钟是 alarm 的兜底（alarm 粒度是 1 秒）。ESRCH（子进程还没来得及 `setpgid`）时退回 `kill(pid)`，否则会漏下真正的孤儿进程
+  - **输出捕获三条硬规则**：① stdout 与 stderr 合并到同一根管道（顺序即原序，省掉事后按时间戳归并）；② **有上限地读**（默认 256KB，超限即截断 + 杀进程组 + 在末尾留一行显式标记 —— 截断必须可见，否则用户看到一段"看起来完整"的输出却少了尾巴）；③ 原始输出**永远保留**（§5.6 最后一句的兜底）
+  - **子进程环境只改三样，每样都写明理由**：`LC_ALL=C`（正则关键词是英文的，工具链若输出本地化关键词会静默变成"零条诊断"）、`LANG=C`、`MALLOC_ARENA_MAX=1`（glibc 每个 arena 在 64 位上预留 64MB 地址空间，1967MB 机器上这一步能显著压掉 cc1plus 的虚拟占用）；stdin 接 `/dev/null`
+  - **阶段二刻意不加 `-Wall`**：那些 warning 全来自 harness 自己（生成代码的未用参数、有符号/无符号比较），会灌进用户看到的输出却与用户代码无关
+  - **本模块自带一把进程级【编译闸门】，容量默认 1**（§0.0 开发机实测）。⚠️ 它与 §2.3 的"全局评测闸门 4"**不是同一个东西**：评测闸门限的是受 `RLIMIT_AS 128MB` 约束的轻量子进程，编译闸门限的是**编译器自身**（不受限、重）。闸门的第二个作用是让 SIGALRM 可用 —— `alarm()` 是进程级的，多线程各设一个会互相覆盖。容量调大前必须重算本机内存
+  - **`stage=kNone` 单独成一路**：工作区缺 `user.cpp` 时返回 `kNone`（而不是 `kUserObject`），让调用点能判 **JE 而非 CE** —— 那是"上游没准备好文件"，§5.6.2 判定表里没有这一行
+  - **本模块只做观测、不判 verdict**：§5.6.2 的第 5 行（0 条 `@@OJ@@` → JE）不是编译阶段的事，把 verdict 放进本模块会诱使调用点"拿到 `CompileResult` 就直接填 verdict"，那正好绕过第 5 行
+  - **单测** `tests/compiler_test.cpp` **20 条全绿**（14 条纯解析 + 4 条真跑 g++ + 超时 + 闸门串行化）。真跑只留覆盖四种结局的最少用例 —— §0.0 的机器上每多一条真编译就多一次峰值内存，而**容易写错的是解析**（归属分流错时不崩，只会静默把 `tester.cpp` 的错误当成用户代码的行号），因此解析用穷举字符串覆盖
+  - **两条超时/串行化用例用"假编译器脚本"而不是"很难编译的源文件"**：后者在 2 核机器上要吃真实内存与数秒 CPU，且"多久算久"依赖机器 —— 用例就只在慢机器上成立。脚本走的是同一段 spawn / 回收 / kill 路径
+  - 尚未接线：`worker` 调用本模块属 T2.7，工作目录创建/清理属 T2.9，`@@OJ@@` 之外的三文件生成属 T1.5
 - [ ] T2.2 g++ 输出正则解析 → `submission_compile_errors` 行（`seq` 保序），路径归一化
   - **归属分流** `D-64`：`user.cpp` → 正常高亮；`tester.cpp`/`solution_decl.h`/`tester_util.h` → `file_name='harness'` + 专属文案，**不提供行号**；链接器 `undefined reference` → `file_name='link'` + 签名核对清单
   - ⚠️ 阶段二（链接 `tester.cpp`）的报错**不代表用户代码有错**，是题库类型错误（§5.6）
+  - **已完成解析与分流**（同 T2.1 的 `compiler.cpp`：`parse_compile_output()` 纯函数，可穷举单测）
+    - **归属判据只有一条：文件名**。用户代码在工作区里只有 `user.cpp` 一个，其余一切路径（生成文件、**系统头**、库）都归 harness —— 因此 g++ 回显相对路径还是绝对路径都得同一结论（判据不依赖路径前缀）
+    - 命中不了 `file:line:col` 的行（`In function ...`、源码摘录、`^~~~`、`collect2` 摘要）**不进诊断表**，原样留在 `output`；`seq` 从 1 起保序
+    - **`link` 诊断的 `line`/`col` 必须是 0**：填一个假的行号会让编辑器去标红一行无关代码（AC-43 要求 `compileErrors` 不含行号项）。它**追加在末尾**而非插在命中位置 —— 它与行号诊断不是同一类
+    - 只认 `undefined reference|undefined symbol` 两个关键词（§5.6 原文），**刻意不**把 `ld returned 1 exit status` 算进来：它只是摘要，把它算进来会让"链接器因别的原因失败"也被贴上"你的签名不一致"这张标签 —— **一个不准确的归因比没有归因更糟**
+    - 正则分组编号写在代码注释里（1=文件 2=行 3=列 4=等级 5=正文）：错位时 severity 会静默变成 `error`，而这不会崩
+    - 行号转成 `unsigned int` 用手写钳位而非 `std::stoul`：后者溢出时抛异常，而这是 worker 的判定路径 —— **一条诊断不该有能力把评测线程抛下去**
+  - **本条仍不勾选**：解析产出的是结构体，落 `submission_compile_errors` 表的那一步归 **T2.11（写回事务）**
 - [ ] T2.1.1 **题库加载期静态校验** `D-64`：按 §5.6.1 的 7 条校验；不通过的题**跳过并 `ERROR` 点名**，不阻塞整库启动；启动日志汇总所有被跳过的题
 - [ ] T2.3 `judge/runner.h`：fork + `setpgid` + setrlimit 五项 + stdin 重定向
 - [ ] T2.4 `wait4` 回收 + **CPU 停滞检测** `D-62` + 进程组 kill + 退出码→verdict 映射
