@@ -34,6 +34,8 @@
 #include <string>
 #include <vector>
 
+#include "web/session.h"   // AuthUser（登录身份由会话层产出，故定义在那边）
+
 namespace oj {
 namespace db {
 class Session;
@@ -46,15 +48,11 @@ namespace web {
 // 顺序上【先判登录（1002）再判角色（1003）】：一个没登录的人携带了别人的 Cookie，
 // 正确答案是"未登录"，不是"无权限" —— 前者会让他去登录，后者会让他以为自己
 // 登录了却没权限（§6.3.3 授权守卫）。
-
-// 调用方（会话层，T3.3）解析 Cookie 后递进来的登录用户。role 只可能是
-// users.role 的两个枚举值之一（§3.2 DDL 是 ENUM，别的值进不来）。
-struct AuthUser {
-  std::string username;
-  std::string role;
-
-  bool is_admin() const { return role == "admin"; }
-};
+//
+// 【AuthUser 为什么上面没有自己的定义】它在 T3.3 之前放在本文件里，是"谁消费谁定义"
+// 的产物。现在会话层（web/session.h）已经落地，而它才是生产这个类型的那一方 ——
+// 守卫吃的是它的输出，让类型留在 admin.h 会让"生产方要 include 消费方"或"两边各写一份"。
+// 故已收敛到 web/session.h，守卫的签名不变。
 
 enum class GuardResult {
   kAllowed,           // → 0    放行

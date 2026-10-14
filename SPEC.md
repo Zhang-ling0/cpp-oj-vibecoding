@@ -2420,7 +2420,6 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `gtest_discover_tests` 固定 `PROPERTIES TIMEOUT 120 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}`（超时防挂死；工作目录与 `make run` 对齐）
   - **不在 CMake 里写死并发**（`CMAKE_BUILD_PARALLEL_LEVEL` 留给调用方）：并发上限是**机器属性**而非项目属性，写进构建系统就换台机器得改代码。约束落在 `Makefile` 的 `JOBS` 与 §0.0 的约定上
   - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
-  - `docker-compose.yml` 与 `Dockerfile` **标为路线 B 可选**，本阶段不实现
 - [ ] T0.2 【路线 B 可选】`Dockerfile` + `docker-compose.yml`：`ubuntu:22.04` 装 `g++-12`、MySQL Connector、cmake
   - **不在关键路径上** —— 若 T0.1 的构建入口跑通，本任务可延后到 M5 或直接砍掉
   - 路线 B 里构建同样走 `cmake -S . -B build`（v1.8 后 Docker 镜像不必自带 make）
@@ -2448,17 +2447,29 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - 5 个 CodeMirror 文件按 **`defer` + 依赖顺序**引入（见 §6.1 末尾的加载顺序说明）
   - 页面内断言 `typeof CodeMirror !== 'undefined' && CodeMirror.modes.clike` —— **C++ 模式没加载时要立刻报错**，不能等到用户发现没高亮
   - 三个 MIT LICENSE 放进 `static/vendor/LICENSES/`
+  - **已落盘 6 / 7 个文件**：`static/vendor/cm/` 下 5 个 CodeMirror（核心 174KB + clike 模式 + 3 个 addon）与 `marked.min.js`（35KB），实测 `codemirror.min.js` 里 `clike` 出现 **0** 次（印证 §6.2 尾注"核心不含语言模式"，因此 5 个文件缺一不可）
+  - **`purify.min.js` 只有 43 字节**，内容是 `Failed to fetch version info for DOMPurify.` —— 下载失败留下的占位文件，**不是** DOMPurify（§6.7.2 的 `curl` 那一步没成功）。**T4.6 的 XSS 过滤在它被换成真库之前不能算数**
+  - **`LICENSES/` 目录尚未创建**（三个 MIT LICENSE）
+  - **五条 HTML 仍是 0 字节**（`login/list/problem/history/admin.html`），故"页面内断言"与加载顺序都无处落地 —— 本条的真正工作量在 T4.1~T4.5，**这是 T4 的前置依赖，不是 T0.6 单独能做完的事**
 - [ ] **验收**：`make run` 后浏览器访问 `localhost:8080` 看到页面；`./logs/app.log` 正常输出；**编辑器有 C++ 高亮**（目视 + 上面那条断言）
 
 ### M1 — 题库与生成器（Day 3–6）★ 最高风险
 
-- [ ] T1.1 `nlohmann/json` 引入 + `problems/two-sum.json` 首个样例题
-- [ ] T1.2 `problem/loader.h`：读目录 → 校验必填字段 → 同步 MySQL（幂等，按 slug）
-  - **校验分两层** `D-64`：① 必填字段（slug/signature/method_name/params/cases/return_type 非空）；② **类型一致性静态校验**（§5.6.1 的 7 条）。第 ② 层失败 → 跳过该题 + `ERROR` 点名，**不阻塞其他题**
+- [√] T1.1 `nlohmann/json` 引入 + `problems/two-sum.json` 首个样例题
+  - **已完成**：`nlohmann_json`（3.11.3）由根 `CMakeLists.txt` 的 `find_package` 发现并链进 `ojcore`，首个使用者是 `src/problem/json_schema.cpp`；`problems/two-sum.json` 已落盘并被加载器实际读入（启动实测"扫描 1 个文件，入库 1 题"）
+- [√] T1.2 `problem/loader.h`：读目录 → 校验必填字段 → 同步 MySQL（幂等，按 slug）
+  - **已完成 `include/problem/loader.h` + `src/problem/loader.cpp`（563 行）与 `problem/json_schema.h/.cpp`（647 行）**，六项要求逐条落地：
+  - **校验分两层** `D-64`：① 必填字段（slug/signature/method_name/params/cases/return_type 非空）；② **类型一致性静态校验**（§5.6.1 的 7 条）。第 ② 层失败 → 跳过该题 + `ERROR` 点名，**不阻塞其他题**（层 ① 与层 ② 都在 json_schema，写库之前跑完）
+    - **不 fail-fast，一次收齐全部问题**：录题的人一次只想改一处；只报第一个会变成"改→重启→看到下一个错"，50 题里的一道可能重启十几次（§4.3 的工作流就是重启驱动的）。代价是每个检查点都要能在已有错误的前提下继续跑，已写进该模块的头注释
+    - 另有三条**本轮定的、SPEC 没单列**的：顶层未知字段（抄写/拼错的唯一可观测信号）、**题面禁图片** `D-48`、`slug` 与文件主名不一致（URL 与题库对不上）
   - `cases[]` / `params[]` 数组按 §4.1 映射表**展开为多行**写入 `problem_cases` / `problem_params`
-  - 同步用 delete-then-insert 单事务语义，保证 JSON 删用例能传播（不留幽灵行）
+  - 同步用 delete-then-insert 单事务语义，保证 JSON 删用例能传播（不留幽灵行）—— `db::Transaction` 守卫，失败即整题回滚
   - 同步完成后同事务回填 `problems.case_count`
-  - 全部入库后灌入进程内只读缓存（结构体含 statement/signature/params/cases），供 judge worker 使用
+  - 全部入库后灌入进程内只读缓存（`cache()` / `find_by_slug()` / `find_by_id()`；缓存是一份 `shared_ptr<const ProblemBundle>` **快照**，运行期只读，故不需要任何锁）
+  - **题库后来被改错时不清库**：把旧行标记失效（清空用例 + `case_count=0`），**不删 `problems` 行** —— 用户的提交历史靠外键挂在这行上，删题会连带删掉历史（§3.1 的取舍）
+  - **已接线**：`main()` 的 §2.3 第 5 步。实测输出：`题库同步 完成（./problems）：扫描 1 个文件，入库 1 题（用例 2 / 形参 2 / 标签关联 3），跳过 0 题`，随后 `判题缓存已就绪：1 题`
+  - **单测** `tests/problem_loader_test.cpp` **17 条** + `tests/json_schema_test.cpp` **37 条** 全绿（真库组连不上 MySQL 时整体 `GTEST_SKIP`）；本模块共 54 条，占全量 345 条执行用例的 15%
+  - `LoadOptions.write_to_db = false` 提供"只解析校验 + 灌缓存、不碰库"的模式，给题库自检与单测用
 - [ ] T1.3 `judge/generator.h` 核心：JSON 值 → C++ 字面量转换器（含字符串转义）
 - [ ] T1.4 类型推导：从 `problem_params.cpp_type` 推导数组嵌套层数
 - [ ] T1.5 生成 `solution_decl.h` / `tester_util.h` / `tester.cpp`
@@ -2493,7 +2504,12 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
     - 正则分组编号写在代码注释里（1=文件 2=行 3=列 4=等级 5=正文）：错位时 severity 会静默变成 `error`，而这不会崩
     - 行号转成 `unsigned int` 用手写钳位而非 `std::stoul`：后者溢出时抛异常，而这是 worker 的判定路径 —— **一条诊断不该有能力把评测线程抛下去**
   - **本条仍不勾选**：解析产出的是结构体，落 `submission_compile_errors` 表的那一步归 **T2.11（写回事务）**
-- [ ] T2.1.1 **题库加载期静态校验** `D-64`：按 §5.6.1 的 7 条校验；不通过的题**跳过并 `ERROR` 点名**，不阻塞整库启动；启动日志汇总所有被跳过的题
+- [√] T2.1.1 **题库加载期静态校验** `D-64`：按 §5.6.1 的 7 条校验；不通过的题**跳过并 `ERROR` 点名**，不阻塞整库启动；启动日志汇总所有被跳过的题
+  - **已完成，就落在 T1.2 的层 ②**（`src/problem/json_schema.cpp` 的 `parse_problem_json`），故与 T1.2 同批交付、同一批单测。7 条的落点：第 1~4 条在 `parse_cases()` 里按 `params[].cpp_type` 的 vector 层数**逐用例**核对（`expected` 深度 / 元素类型 / `args` 数量 == `params` 数量 / `args[i]` 深度）；第 5 条 `method_name` 必须是 `signature` 里的**独立标识符**（`signature_declares_method()`，只做子串匹配会把 `twoSum2` 误判为声明了 `twoSum`）；第 6 条非空在层 ①；第 7 条用了 `__expr` 就必须有非空 `harness_prelude`
+  - **失败处理按 SPEC 原文**：整题跳过 + `ERROR` 点名。加载器据此把库里旧行标记失效（用例清空 + `case_count=0`），**不删 `problems` 行**（用户的提交历史挂在这行上）
+  - **问题的种类是分类的**（`IssueKind`）：`kMissing` / `kType` / `kValue` / `kConsistency` / `kImage` …… 这样"【值域超长】"与"【类型不一致】"在 50 道题的启动日志里一眼可辨，而不是混成一句"校验失败"
+  - **单测** `tests/json_schema_test.cpp` 37 条覆盖 7 条各自的正反例（深度差一层 / 元素不是数字 / `args` 比 `params` 多一个 / 方法名不在 signature / 有 `__expr` 无 prelude …）
+  - **与 §5.6 的关系没变**：静态校验挡常见错误，**归属分流（`harness` / `link`）必须保留** —— `__expr` 里是任意 C++ 表达式，静态校验挡不住（§5.6.1 末段）
 - [ ] T2.3 `judge/runner.h`：fork + `setpgid` + setrlimit 五项 + stdin 重定向
 - [ ] T2.4 `wait4` 回收 + **CPU 停滞检测** `D-62` + 进程组 kill + 退出码→verdict 映射
   - 判据是「**连续 3 次、间隔 500ms，CPU 时间增量为 0**」，**不是**「墙钟超过 N 倍」—— v1.4 的墙钟算法在 8 并发下会误杀合法解法（§5.4.1 有推演）
@@ -2548,6 +2564,16 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `register` / `login` / `me` 三个响应体追加 `role` 字段
   - `register` 入口先查 `OJ_ALLOW_REGISTER`，为 0 时返回 1010 且不落库
   - `register` **不做提权** —— 新用户恒为 `user`，角色只由 T3.9 的启动同步决定
+  - **已完成会话/Cookie 层 `include/web/session.h` + `src/web/session.cpp`**（bcrypt 与注册/登录端点仍待做）：
+    - **五个纯函数**（不碰 DB，永远可单测）：`generate_token()`（`RAND_bytes` 32 字节 → 64 小写 hex）、`is_token_wellformed()`、`parse_sid()`、`make_set_cookie()`、`make_clear_cookie()`。`Set-Cookie` 逐字为 `sid=…; HttpOnly; SameSite=Lax; Path=/`（§6.3 / `D-69`），**故意不加 `Secure`**（明文 HTTP 下加了永不下发），欠账与启用 HTTPS 时的三条动作见 §6.3.2.1
+    - **`parse_sid` 要求名字【全等】匹配**：`xsid=` / `sid_extra=` / `SID=` 一律不算本站会话；剥一层成对双引号；**第一个 `sid` 说了算**（同名重复只可能来自不同 Path 的遗留，继续往后找会让规则随浏览器排序而变）
+    - **token 形状检查先于任何 SQL**：`sessions.token` 是 utf8mb4 `CHAR(64)`，默认排序规则 `utf8mb4_general_ci` **大小写不敏感** —— 不先钉死"64 个小写 hex"，`WHERE token='AB…'` 会命中库里那条 `ab…`。`find_user()` 是唯一的查会话入口，将来新增查会话 SQL 必须同样先过这一关
+    - **五个 DB 动作**：`purge_expired()`（§6.3.2）、`issue()`（**同事务内先回收再签发**，避免并发登录互删对方刚落库的行）、`find_user()`（单条 JOIN 取 username/role，过期即不存在，**读路径不写库**）、`destroy()`（幂等）、`destroy_others()`（`AND token <> ?` 保留当前会话，`D-40`/`AC-21`）
+    - **`expires_at` 一律由 MySQL 算**（`UTC_TIMESTAMP() + INTERVAL ? DAY`），TTL 唯一来源是 `config().session_ttl_days` —— C++ 侧没有第二处 TTL 常量，也没有第二处时钟
+    - **`AuthUser` 收敛到 `web/session.h`**：它由会话层产出、被 `admin.h`/路由/列表页消费，故定义在生产方一侧。`admin.h` 的 `require_admin()` 签名与其 15 条单测**零改动**（改为 include `session.h`）
+    - **匿名流量不碰 DB**：`authenticate()` 先解析 Cookie、**没带 sid 连租约都不取**（`[D-43]` 允许匿名读题面，不该在 `[D-21]` 的全局互斥量上排队）
+    - **单测** `tests/session_test.cpp` **26 条全绿**（纯逻辑 13 + 真库 13；连不上 MySQL 时真库组整体 `GTEST_SKIP`），全量 `ctest` **345 条执行全通过 + 1 条既有跳过**（`LoaderTest.DatabaseFailureRollsBack…`，MySQL 账号缺 `SUPER` 建不了触发器，与本模块无关且早于本轮）
+    - **本条仍不勾选**，待接线：① bcrypt 与注册/登录/logout/me 四个端点（T3.5 + §6.2.1）；② 启动时调一次 `purge_expired()`（T3.9）；③ `ratelimit::forget(user_id)` 与注销联动（T3.18 `D-70`）
 - [ ] T3.4 限流器：每用户 60s 滑动窗口 + 同时评测数配额
 - [ ] T3.5 路由：§6.3 全部端点 + 统一包络 + 错误码映射
 - [ ] T3.6 列表查询：多条件筛选 + 分页 + JOIN 进度与收藏
@@ -2570,9 +2596,11 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - 建表之后、加载题库之前，跑一次过期会话回收（§6.3.2）
   - 角色同步紧接题库同步之后，两者复用同一套「改配置 + 重启」的运维模式
 - [ ] T3.10 过期会话回收（§6.3.2）：启动时一次 + 每次登录时一次，`DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP()`
-  - **必须用 `UTC_TIMESTAMP()` 而非 `NOW()`** —— 容器时区非 UTC 时会误删未过期会话
-  - 复用同一个全局 `DB mutex`；回收失败仅记日志，不阻断登录
-  - `EXPLAIN` 确认走 `idx_expire`（期望 `type=range`），无需新增索引
+  - **已完成 `session::purge_expired()`**（`src/web/session.cpp`）：必须用 `UTC_TIMESTAMP()` 而非 `NOW()`（容器时区非 UTC 时会误删未过期会话）；复用同一个全局 `DB mutex`（吃调用方递进来的租约）；回收失败仅记日志，不阻断登录；走 `idx_expire` 无需新增索引
+  - **「每次登录时一次」已并入 `session::issue()`**（同事务内回收 + 插入，§6.3.2 的约束），所以登录端点只需调它一个入口
+  - **边界语义已在单测里钉死**：`expires_at == 当前秒` 的行**不被回收**（语句是 `<`）但**已不能登录**（查询是 `>`）—— 两条语句在同一秒上给出互补答案；改任一侧的比较符都会红
+  - **仍待接线**：T3.9 启动顺序里的那一次调用（本模块只提供函数，没有调用点）
+  - **`EXPLAIN` 已实测（8.0.46）**：回收语句 `type=range / key=idx_expire`（正是本条要求的形态，无需新增索引）；`find_user()` 的 JOIN 两侧都是 `type=const`（token 走 PRIMARY、user_id 走 PRIMARY 常量折叠）
 - [ ] T3.11 角色同步（§6.3.1）`[D-37]`
   - 4 条约束逐条落地：未设置则跳过 / 双向同步 / 缺失用户名逐个 WARN / 同步后回显名单
   - 同步 SQL 走预处理语句占位符（`IN (?,?,...)`），**禁止把名单拼进 SQL 字符串**（§1.4）
@@ -2592,6 +2620,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - 复用同一个全局 `DB mutex`；两个 `user_id` 相同的 SQL 走预处理语句占位符
   - 错误一律 1001 + `data.field`（`oldPassword` / `newPassword`），**不新增错误码**
   - **不加独立限流器** —— 威胁模型是"已登录用户改自己的密码"，见 §6.3.5 的说明
+  - **会话侧零件已就绪**：`session::destroy_others(user_id, keep_token, removed, error)` 就是本条的 `DELETE FROM sessions WHERE user_id=? AND token<>?`（T3.3 已实现并单测），缺的是 bcrypt 验旧密码与路由接线
 - [ ] T3.14 `GET /api/me/overview`（§6.5）`[D-38] [D-39]`
   - 返回 `{totals, byDifficulty[], byTag[], recent[]}`；`recent` 取最近 3 条提交摘要
   - **`byTag` 必须用 `COUNT(DISTINCT p.id)` + 两个 `SELECT DISTINCT problem_id` 子查询**；直接 JOIN `problem_tags` 后 `COUNT(*)` 会因一题多标签重复计数（AC-22 验证）
