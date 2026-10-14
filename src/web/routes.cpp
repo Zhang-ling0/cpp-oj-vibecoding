@@ -178,22 +178,22 @@ void handle_login(const httplib::Request& req, httplib::Response& res) {
 
 // POST /api/auth/logout → 200 + 清 Cookie。幂等：没有 Cookie 也成功
 // （§6.3 的端点语义是"让这个浏览器不再是登录态"，本该幂等）。
+//
+// 【决策放在 plan_logout 里，理由见 routes.h 的 LogoutPlan】
 void handle_logout(const httplib::Request& req, httplib::Response& res) {
-  std::string token;
-  if (req.has_header("Cookie")) {
-    const std::optional<std::string> sid = parse_sid(req.get_header_value("Cookie"));
-    if (sid.has_value()) token = *sid;
-  }
+  const std::string cookie =
+      req.has_header("Cookie") ? req.get_header_value("Cookie") : std::string();
+  const LogoutPlan plan = plan_logout(cookie);
 
   std::string clear_cookie;
-  if (!token.empty()) {
+  if (plan.needs_db) {
     db::Lease lease = db::Pool::instance().acquire();
     if (!lease.valid()) {
       send_pool_unavailable(req, res);
       return;
     }
     std::string error;
-    if (!logout_user(lease.session(), token, &clear_cookie, &error)) {
+    if (!logout_user(lease.session(), plan.token, &clear_cookie, &error)) {
       common::log_error(common::LogChannel::kApp, "登出失败：" + error);
       send(common::fail(common::ApiError::kInternalError), res);
       return;
@@ -284,6 +284,23 @@ void handle_exception(const httplib::Request& req, httplib::Response& res,
 }
 
 }  // namespace
+
+// 登出的决策（声明与理由见 routes.h 的 LogoutPlan）。
+//
+// 【为什么"形状非法的 sid"仍然 needs_db】
+//   判据是**非空**，不是 is_token_wellformed。logout 对任意 token 都成立：
+//   session::destroy 删不掉就是 0 行，那也是成功（幂等）。
+//   反过来若在这里加一道形状检查、形状非法就跳过 DB，症状是"浏览器里的坏 Cookie
+//   永远清不掉"—— 而清除 Cookie 那头照发，看似生效，实则下次带上同一个坏 Cookie
+//   还是老样子。少一次无谓的 DELETE 比多留一个清不掉的 Cookie 划算。
+LogoutPlan plan_logout(const std::string& cookie_header) {
+  LogoutPlan plan;
+  const std::optional<std::string> sid = parse_sid(cookie_header);
+  if (!sid.has_value() || sid->empty()) return plan;   // 未登录，不碰 DB（[D-21]）
+  plan.needs_db = true;
+  plan.token = *sid;
+  return plan;
+}
 
 // 收口决策的唯一实现（声明与理由见 routes.h【错误收口的决策】）。
 //

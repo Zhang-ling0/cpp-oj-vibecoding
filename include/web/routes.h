@@ -90,6 +90,32 @@ struct ErrorRouting {
 // 纯函数：不打日志、不碰 httplib 类型，故任意线程可并发调用，也不需要起服务就能测。
 std::optional<ErrorRouting> error_reply_for(int status, bool body_already_written);
 
+// ---- 登出的决策（纯函数；与 error_reply_for 同一手法）--------------------------
+
+// `POST /api/auth/logout` 的**唯一**决策：给定 Cookie 头，决定要不要碰 DB、
+// 以及把哪个 token 交给 web::logout_user。
+//
+// 【为什么要抽出来，而不是留在 handle_logout 里】
+//   handle_logout 里真正的判断只有一个 —— **"带没带 sid 决定要不要取租约"** ——
+//   而它恰恰是本文件顶部那条约定（§2「先解析 Cookie → 有 sid 才取租约」）的落点：
+//   匿名点一次「登出」（顶栏未登录形态没有该按钮，但 curl、重复点击、页面回退都可能发生）
+//   不该在 [D-21] 的全局互斥量上排队等一次 `DELETE ... WHERE token='不存在的'`
+//   —— 那一删必然影响 0 行，却要让整个服务的 DB 串行化队列停一下。
+//
+// 【needs_db 为 false 时 handle_logout 仍然回 200 与清除 Cookie】
+//   §6.3 的登出端点写的是「删除会话行，清 Cookie」，且 Auth=否（未登录也 200）。
+//   幂等是应有性质：用户连点两次、Cookie 已失效后再点一次，都不该看到红字。
+//   而清除 Cookie 那一头**必须**无条件下发 —— 浏览器里可能存着一个本服务
+//   认不出来的（形状非法）sid，让浏览器自己删掉比留着强。
+struct LogoutPlan {
+  bool needs_db = false;  // false ⇒ 无非空 sid，handle_logout 不得取租约
+  std::string token;      // 交给 logout_user 的 token；needs_db == false 时必为空
+};
+
+// cookie_header 允许为空（httplib 在请求没有 Cookie 头时给的就是空串），
+// 也允许是任意畸形串 —— parse_sid 对畸形串返回 nullopt 而不是抛异常。
+LogoutPlan plan_logout(const std::string& cookie_header);
+
 // ---- 起服务 -------------------------------------------------------------------
 
 // 起服务需要的全部外部依赖。做成一个可递进的结构体而不是读 config() 全局：
