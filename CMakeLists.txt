@@ -142,6 +142,8 @@ set(OJCORE_SOURCES
     src/problem/json_schema.cpp
     src/problem/loader.cpp
     src/web/admin.cpp
+    src/web/auth_api.cpp
+    src/web/bcrypt.cpp
     src/web/problem_api.cpp
     src/web/ratelimit.cpp
     src/web/routes.cpp

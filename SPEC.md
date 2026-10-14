@@ -2441,7 +2441,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
       - 判别力已实测：把两处修复各自退回后，`TimestampSecondsAndMillisComeFromOneClockRead` / `LineStampAndItsFileDateNeverDisagreeAcrossMidnight` / `RetentionAlsoDeletesSequenceSuffixedRotatedFiles` 三条立即变红
       - 为此给 `log_test_set_time()` 加了可选的 `millis` 参数：早先覆盖时钟时毫秒被写死 0，等于把"两次读取"这件事藏了起来，真实时钟下它只在秒边界那一瞬发生（每晚一行），不给出可冻结的毫秒值就无从单测
     - **回归**：`ctest --test-dir build` **320/320 通过**；`-DOJ_SANITIZE=address,undefined` 下同样 **320/320 通过**（构建 `-j1`）
-  - `response.h`/`errors.h` 尚未开工，故本条**不勾选**
+  - **`errors.h` 已开工**（T3.3 轮补上：§6.3 的 20 个码 + `http_status()` + `message()`，`2xxx` 段一律映射 200）；`response.h`（统一包络）仍未开工，故本条**不勾选**
 - [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
 - [ ] T0.6 **vendored 前端库接入** `[D-73]`
   - 5 个 CodeMirror 文件按 **`defer` + 依赖顺序**引入（见 §6.1 末尾的加载顺序说明）
@@ -2558,13 +2558,27 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `dao.h` 尚空，「所有 DAO 用预处理语句」要等 **T3.2**，故本条**不勾选**
   - **已接线**：`main()` 在 `load_config()` / `init_logging()` 之后调用 `init_from_config()`，失败即打印原因并 `exit(1)`；退出前 `shutdown()` 归还连接。§2.3 的启动顺序因此推进到「DB 就绪 + 建表完成」（T0.3），第 5~8 步（题库/角色/judge/listen）仍待接线
 - [ ] T3.2 DAO：`user` `problem` `problem_case` `problem_param` `tag` `submission` `submission_case_result` `submission_compile_error` 八组
-- [ ] T3.3 认证：自实现 bcrypt（`libssl-dev` Blowfish，`D-74`）注册/校验 + 64 hex token 会话 + HttpOnly Cookie
-  - **先写测试向量校验**（RFC 6234 / Provos 的 `$2a$` / `$2b$` 用例），**逐字节比对**参考输出；base64 变体字母表是 `./A-Za-z0-9` 顺序而非标准 base64，是最易错点（§6.2.1）
-  - cost=10；`password_hash` 列宽 255 足够，**不改 DDL**
-  - `register` / `login` / `me` 三个响应体追加 `role` 字段
-  - `register` 入口先查 `OJ_ALLOW_REGISTER`，为 0 时返回 1010 且不落库
-  - `register` **不做提权** —— 新用户恒为 `user`，角色只由 T3.9 的启动同步决定
-  - **已完成会话/Cookie 层 `include/web/session.h` + `src/web/session.cpp`**（bcrypt 与注册/登录端点仍待做）：
+- [√] T3.3 认证：自实现 bcrypt（`libssl-dev` Blowfish，`D-74`）注册/校验 + 64 hex token 会话 + HttpOnly Cookie
+  - **已完成自实现 bcrypt `include/web/bcrypt.h` + `src/web/bcrypt.cpp`**（约 300 行，只用 libcrypto 已有的 Blowfish 原语 / `RAND_bytes` / `CRYPTO_memcmp`，**零新增依赖**；唯一"自己抄"的是 Blowfish 初始状态那 1042 个 π 十六进制字面量）：
+    - **`D-75` 的理由在本机复核过**：`libbcrypt-dev` 无 Candidate，故自实现；`BF_encrypt` 在 OpenSSL 3.0.13 上标了 deprecated，本文件用 `OPENSSL_SUPPRESS_DEPRECATED` 显式关闭告警（EVP 不暴露 P/S 状态，做不了 EksBlowfishSetup，要的就是这层低层原语）
+    - **`R-20` 的三个坑全部踩到并已钉进单测**（症状都是"能跑、但与所有外部工具算出的哈希都不同"，不会崩）：① **每个 encipher 消耗【两个】盐字分别异或到 l 与 r**（不是 l/r 交替一个 —— OpenBSD 早期文献的写法会算出完全不同的哈希）；② **摘要编码 24 字节密文的【前 23 字节】**，不是"编码 24 字节再截掉最后一字符"（两者差在最后一个字符的 2 个比特上，而它就是哈希的最后一位）；③ **密钥流长度取 `strlen + 1`**（结尾 NUL 参与），且口令里的 NUL 会截断口令
+    - **AC-49 已达成**：`tests/bcrypt_test.cpp` **11 条**用参考实现（本机 libxcrypt + pyca/bcrypt 3.2.2）逐字节比对了 10 条向量（空口令、单字符、`U*U`、`U*U*`、26 字母、特殊符号、非 ASCII「面试准备2026」、cost 4/5/6/10、72 字节），外加"72/80 字节同哈希""NUL 截断""随机盐不同""坏哈希不抛异常"四条不变量
+    - `$2a$`/`$2b$`/`$2y$` 三变体同盐同口令**摘要相同**（前缀不同），故本项目只写 `$2b$`、但能验历史遗留行；`$2x$`（有 bug 的实现的标记）与 `$2$`（1997 老变体）**刻意拒绝**
+  - **已完成注册 / 登录 / 登出 / 我是谁 的业务层 `include/web/auth_api.h` + `src/web/auth_api.cpp`**（4 条 SQL，全部预处理占位符，无字符串拼接）：
+    - **四道闸门的顺序不能换**：① `OJ_ALLOW_REGISTER=0` → 1010 **且不落库**（§6.3 写的是"先查"，否则关掉注册后仍能从 1001 的长度校验反推出"注册开着"）；② 用户名 → 1001 `field=username`；③ 密码 → 1001 `field=password`；④ 判重 → 1005。**bcrypt 只在四道都过之后才做**（cost=10 约 60~100ms，放在校验前等于让纯格式错误的请求也吃掉 100ms）
+    - **注册不做提权**：`role` 在 INSERT 里显式写死 `'user'`，不依赖 DDL 的 DEFAULT、也不接受请求里的 role 字段 —— 管理员身份只由 T3.11 的启动同步决定（§6.3.1）。端点层"顺手支持管理员注册"会把声明式名单变成第二个真源
+    - **并发注册的 1062 也映射成 1005**（不是 1008）：判重查询挡不住两个并发请求，唯一保证是 `uk_username`，两种情况必须给用户同一个答案
+    - **登录不给"用户不存在"与"密码错误"分别的文案**：两者都是 1001 `field=password` + 同一句理由，否则登录接口就成了用户名枚举器（AC-1 的 1005 只针对注册）。配套动作：**用户不存在时也跑一次 bcrypt**（对着固定假哈希）把耗时拉回同一量级 —— 假哈希用 cost=4 且固定不变（现算的话"用户不存在"反而比真实登录快 60ms，那本身又是一个信号）
+    - **本轮定的、SPEC 没单列的一条**：用户名字符集限定 `[A-Za-z0-9_-]`（长度仍是 §5.8 的 3–32）。三条理由都指向 DB 现状 —— ① `users.username` 是 `utf8mb4_general_ci` **大小写不敏感**，不限定就会出现 Bob/bob 别名；② MySQL 的 PAD SPACE 比较忽略尾部空格，会出现"我明明注册了却说已存在"；③ `OJ_ADMIN_USERNAMES` 按精确字符串匹配，名字里混入不可见字符时提权会静默不生效（§6.3.1 约束 3 只 WARN 缺失名单，不 WARN"名字带了不可见字符"）
+    - **登录的 bcrypt 发生在持有 DB mutex 期间**（`[D-21]` 串行化），耗时 < 200ms，§6.2.1 要点 3 已判定可接受；将来流量变大时正确做法是把"查用户"与"算 bcrypt"拆成两段租约，而不是加连接（串行化下加连接不提高吞吐）
+  - **已完成 `include/common/errors.h` + `src/common/errors.cpp`**（T0.4 的一半）：§6.3 的 20 个码 + `http_status()` + `message()` 集中一处。`[D-29]` 的"业务码与 HTTP 状态码同步"落在这里，且 **2xxx 段（判题结论）一律映射 200** —— 它们走 HTTP 200 + `data.verdict`，不是 API 异常。`web/admin.h`（T3.12，早于本文件）自带的 `error_code_of/error_message_of` 暂未改动，接线 T3.5 统一包络时应让它们转调本文件
+  - **单测** `tests/bcrypt_test.cpp` **11 条**（纯计算，无 DB，247ms）+ `tests/auth_api_test.cpp` **20 条**（纯逻辑 10 + 真库 10；连不上 MySQL 时真库组整体 `GTEST_SKIP`）**全绿**。**AC-1 四条全部有对应断言**：重复用户名 1005 / 错误密码 1001 / 登出后旧 Cookie 查不到身份（路由层据此回 1002）/ 登录发的 Cookie 能维持会话
+  - **1010 那条分支原先写不出用例，处置是【把策略做成递进来的值】而不是改 config**：`common::config()` 是进程级只读快照、`load_config()` 只能整体重载一次，单测改它会污染同进程其它模块的结论。故新增 `RegisterPolicy{allow_register}`，生产入口 `register_user(...)` 内部读 `config()` 填它（.env 仍是唯一真源，`§6.3.1` 的声明式取向不变），单测递 `false`。用例同时钉住了**开关先于参数校验**——挪到校验之后的话，注册关闭状态下"用户名为空"会回 1001，外部就能靠错误码反推出"这里曾经开放注册"
+  - **回归**：`ctest --test-dir build` **377/377 通过**（本轮新增 31 条；唯一跳过的 `LoaderTest.DatabaseFailureRollsBack…` 是 MySQL 账号缺 `SUPER` 建不了触发器，早于本轮）
+  - **⚠️ 一处【刻意不覆盖】的分支**：并发注册撞 `uk_username` 的 1062 → 1005。`[D-21]` 的全局互斥量让同进程两个线程必然串行，后到者的判重查询必然看到已插入的那行，因此**在本项目的线程模型下这条分支不可达**，要造出来只能靠注入时序的测试钩子。它的兜底价值也低（判重 + 唯一索引已是双重保证），故不写一条永真的用例充数；将来若 `Pool::size > 1` 让 DB 访问真正并行，这条分支会变为可达，届时必须补测
+  - **本条已勾选**，但 HTTP 侧仍未接线：路由与统一包络（T3.5，`common/response.h` 尚未开工）、`Set-Cookie` 头真正落到响应上（T0.5 起 httplib）、`OJ_ALLOW_REGISTER=0` 的 1010 用例需要可注入的配置（当前真库组跑在 `allow_register` 的内置默认值 `true` 下）
+
+  - **已完成会话/Cookie 层 `include/web/session.h` + `src/web/session.cpp`**（bcrypt 与注册/登录端点已由同一条目的后续条目补齐，见上）：
     - **五个纯函数**（不碰 DB，永远可单测）：`generate_token()`（`RAND_bytes` 32 字节 → 64 小写 hex）、`is_token_wellformed()`、`parse_sid()`、`make_set_cookie()`、`make_clear_cookie()`。`Set-Cookie` 逐字为 `sid=…; HttpOnly; SameSite=Lax; Path=/`（§6.3 / `D-69`），**故意不加 `Secure`**（明文 HTTP 下加了永不下发），欠账与启用 HTTPS 时的三条动作见 §6.3.2.1
     - **`parse_sid` 要求名字【全等】匹配**：`xsid=` / `sid_extra=` / `SID=` 一律不算本站会话；剥一层成对双引号；**第一个 `sid` 说了算**（同名重复只可能来自不同 Path 的遗留，继续往后找会让规则随浏览器排序而变）
     - **token 形状检查先于任何 SQL**：`sessions.token` 是 utf8mb4 `CHAR(64)`，默认排序规则 `utf8mb4_general_ci` **大小写不敏感** —— 不先钉死"64 个小写 hex"，`WHERE token='AB…'` 会命中库里那条 `ab…`。`find_user()` 是唯一的查会话入口，将来新增查会话 SQL 必须同样先过这一关
@@ -2573,7 +2587,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
     - **`AuthUser` 收敛到 `web/session.h`**：它由会话层产出、被 `admin.h`/路由/列表页消费，故定义在生产方一侧。`admin.h` 的 `require_admin()` 签名与其 15 条单测**零改动**（改为 include `session.h`）
     - **匿名流量不碰 DB**：`authenticate()` 先解析 Cookie、**没带 sid 连租约都不取**（`[D-43]` 允许匿名读题面，不该在 `[D-21]` 的全局互斥量上排队）
     - **单测** `tests/session_test.cpp` **26 条全绿**（纯逻辑 13 + 真库 13；连不上 MySQL 时真库组整体 `GTEST_SKIP`），全量 `ctest` **345 条执行全通过 + 1 条既有跳过**（`LoaderTest.DatabaseFailureRollsBack…`，MySQL 账号缺 `SUPER` 建不了触发器，与本模块无关且早于本轮）
-    - **本条仍不勾选**，待接线：① bcrypt 与注册/登录/logout/me 四个端点（T3.5 + §6.2.1）；② 启动时调一次 `purge_expired()`（T3.9）；③ `ratelimit::forget(user_id)` 与注销联动（T3.18 `D-70`）
+    - **仍待接线**（本轮已补齐 ①）：② 启动时调一次 `purge_expired()`（T3.9）；③ `ratelimit::forget(user_id)` 与注销联动（T3.18 `D-70`）
 - [ ] T3.4 限流器：每用户 60s 滑动窗口 + 同时评测数配额
 - [ ] T3.5 路由：§6.3 全部端点 + 统一包络 + 错误码映射
 - [ ] T3.6 列表查询：多条件筛选 + 分页 + JOIN 进度与收藏
@@ -2586,7 +2600,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - 标签筛选用**逐标签一个 EXISTS**（AND 语义 = 同时挂全部所选标签），不用 JOIN+DISTINCT：JOIN 会把题乘以标签数，`LIMIT/OFFSET` 就在乘完的结果上取，第 2 页直接漏题
   - 关键词 LIKE 的 `% _ \` 全部转义并显式写 `ESCAPE`（用户搜 `100%` 时 `%` 必须当字面量）；四个排序方案都以 `p.id ASC` 收尾 —— 少一个稳定 tiebreaker，"翻页不重不漏"会偶发漏题
   - **单测** `tests/problem_api_test.cpp` **63 条全绿**（纯逻辑 34 + 真库 29；连不上 MySQL 时真库组整体 `GTEST_SKIP`），`-DOJ_SANITIZE=address,undefined` 尚未重跑（本机 LSan 受限，见根 `CMakeLists.txt` 注释）
-  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，`common/response.h`/`errors.h` 未开工，`to_json()` 只产出 data 块）；② Cookie → 登录上下文（T3.3，`ViewerContext*` 由会话层递进来）；③ 收藏切换端点（`POST /api/problems/{slug}/favorite` 属 T4.9 的后端，本轮未做）
+  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，`common/response.h` 未开工 —— `errors.h` 已由 T3.3 补上；`to_json()` 只产出 data 块）；② Cookie → 登录上下文（T3.3 已提供 `web::authenticate()`，`ViewerContext*` 由会话层递进来）；③ 收藏切换端点（`POST /api/problems/{slug}/favorite` 属 T4.9 的后端，本轮未做）
 - [ ] T3.7 提交端点：校验 → 落库 pending → 入队 → 返回 201
 - [ ] T3.8 提交详情端点：仅本人可见 + 按 §6.3 的三步组装 `caseResults` / `compileErrors`
   - `submission_case_results` 按 `case_idx ASC`；`submission_compile_errors` 按 `seq ASC`
@@ -2612,7 +2626,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **锁顺序**：先取 scheduler 快照并释放其锁，再取 `DB mutex` 查 DB；禁止 `DB mutex → scheduler lock` 嵌套
   - **已完成业务层 `include/web/admin.h` + `src/web/admin.cpp`**：`require_admin()` 守卫、`load_system_counts()`/`load_users()` 两条聚合 SQL（全在 SQL 内、无 N+1）、`build_overview()`（**先取快照后取租约**，§6.3.3 实现约束 2 落地）、`to_json()`（camelCase 契约）。三个入口都做成"依赖外部递进来"（`AuthUser` / `StatusProvider` / `db::Session&`），接线时不必改本文件
   - **单测** `tests/admin_test.cpp` **15 条全绿**（守卫顺序、JSON 字段契约、锁顺序、失败路径不变式 9 条纯逻辑 + 真库聚合 6 条；探针数据带 `ojadm` 前缀并在 `TearDown` 级联删净）。`-DOJ_SANITIZE=address,undefined` 下同样全绿
-  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，且 `common/response.h`/`errors.h` 未开工）；② Cookie → 登录用户（T3.3，`AuthUser` 由会话层递进来）；③ 运行态三项的真实来源（T2.7 调度器；当前 `unwired_status_provider()` **如实**返回 `judgeAlive=false`，不拿 DB 的 pending 行数冒充 `queueLength`）
+  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，`common/response.h` 未开工；`errors.h` 已由 T3.3 补上）；② Cookie → 登录用户（T3.3 已提供 `web::authenticate()`，`AuthUser` 由会话层递进来）；③ 运行态三项的真实来源（T2.7 调度器；当前 `unwired_status_provider()` **如实**返回 `judgeAlive=false`，不拿 DB 的 pending 行数冒充 `queueLength`）
   - **两处口径是本轮定的、文档没写死的**（代码里各只需改一行，注释已标注）：`judgingCount` 取 `status IN ('pending','judging')`（只数 `judging` 会让 judge 未接线时排队中的提交在页面上彻底不可见）；`users[].solved` 与 `attempted` **不互斥**（`attempted` = 有过任意提交的题数，与 §6.5 的 `byDifficulty`/`byTag` 写法同源；单题粒度仍走 §6.4 的 `CASE`）
 - [ ] T3.13 改密码端点（§6.3.5）`[D-40]`
   - `POST /api/auth/password`：bcrypt `compare` 验旧密码 → 事务内 `UPDATE password_hash` + `DELETE FROM sessions WHERE user_id=? AND token<>?`
