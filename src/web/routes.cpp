@@ -1,10 +1,10 @@
 // =============================================================================
 // 路由接线层（include/web/routes.h 的配套）
-// 见该头文件顶部对分层边界的说明。此处只把 §6.3 认证组的四个端点接起来：
-//   POST /api/auth/register / login / logout，GET /api/auth/me
-// 其余端点（题目组 T3.6、提交组 T3.7/T3.8/T3.15…、admin T3.12、改密 T3.13、
-// 注销 T3.18、限流 T3.4）在各自业务层就绪后陆续【追加】到同一个 register_routes 里 ——
-// 不做"路由表"抽象：四个端点的形状差异（要不要租约、要不要 Set-Cookie、
+// 见该头文件顶部对分层边界的说明。此处把 §6.3 的全部端点接起来：
+//   认证组（register/login/logout/me/password/account）、题目组（tags/problems/
+//   problems/{slug}/favorite）、提交组（6 个）、统计组（stats/me/overview）、admin 组。
+// 业务逻辑一律在 web/*_api 里，本文件只做三件事：取参 → 调业务层 → 发包络。
+// 不做"路由表"抽象：各端点的形状差异（要不要租约、要不要 Set-Cookie、匿名还是必须登录、
 // 失败码由谁给）大到一张表反而会多出一层与业务层重复的映射。
 // =============================================================================
 
@@ -22,12 +22,17 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "common/config.h"
 #include "common/errors.h"
 #include "common/log.h"
 #include "common/response.h"
 #include "db/mysql_pool.h"
+#include "web/admin.h"
 #include "web/auth_api.h"
+#include "web/problem_api.h"
 #include "web/session.h"
+#include "web/submission_api.h"
+#include "web/user_api.h"
 
 namespace oj {
 namespace web {
@@ -99,6 +104,110 @@ void send_pool_unavailable(const httplib::Request& req, httplib::Response& res) 
   common::log_error(common::LogChannel::kApp,
                     req.method + " " + req.path + "：连接池未就绪，取不到租约");
   send(common::fail(common::ApiError::kInternalError), res);
+}
+
+// ---- 登录上下文（§1.3 的四层鉴权里唯一真正用到的那一层）-------------------------
+
+std::string cookie_of(const httplib::Request& req) {
+  return req.has_header("Cookie") ? req.get_header_value("Cookie") : std::string();
+}
+
+// 解析登录身份。out 有值 = 已登录；*out_server_error=true = DB 异常（**已自行发 1008**）；
+// 两者皆否 = 匿名（[D-43]：题面/列表/标签公开可读，故匿名不是错误）。
+//
+// 【为什么匿名路径不取 DB 租约】authenticate(cookie, …) 的便捷重载先解析 Cookie，
+// 没带 sid 就直接返回 nullopt —— 未登录流量不会在 [D-21] 的全局互斥量上排队。
+std::optional<AuthUser> viewer_of(const httplib::Request& req, httplib::Response& res,
+                                  bool* out_server_error) {
+  *out_server_error = false;
+  std::string error;
+  std::optional<AuthUser> user = authenticate(cookie_of(req), &error);
+  if (!error.empty()) {
+    common::log_error(common::LogChannel::kApp,
+                      req.method + " " + req.path + " 查会话失败：" + error);
+    send(common::fail(common::ApiError::kInternalError), res);
+    *out_server_error = true;
+    return std::nullopt;
+  }
+  return user;
+}
+
+// 必须登录的端点用它。未登录一律 1002（无 Cookie / 已过期 / sid 形状非法三态同码）。
+bool require_viewer(const httplib::Request& req, httplib::Response& res, AuthUser* out) {
+  bool server_error = false;
+  const std::optional<AuthUser> user = viewer_of(req, res, &server_error);
+  if (server_error) return false;
+  if (!user.has_value()) {
+    send(common::fail(common::ApiError::kUnauthenticated), res);
+    return false;
+  }
+  *out = *user;
+  return true;
+}
+
+// problem_api 的 ViewerContext：由同一次会话解析结果构造（user_id 决定"这些数据是谁的"）。
+ViewerContext viewer_context(const AuthUser& user) {
+  ViewerContext viewer;
+  viewer.user_id = user.user_id;
+  viewer.username = user.username;
+  return viewer;
+}
+
+// 路径里的数字参数。纯数字外的一切（含空串、负数、超长）一律 false → 1004，
+// 不去 SQL 里问"这个 id 存不存在"（那会让每个坏 id 都占一次往返）。
+bool path_id(const httplib::Request& req, std::size_t slot, unsigned long long* out) {
+  if (req.matches.size() <= slot) return false;
+  const std::string& text = req.matches[slot];
+  if (text.empty() || text.size() > 19) return false;
+  unsigned long long value = 0;
+  for (const char c : text) {
+    if (c < '0' || c > '9') return false;
+    value = value * 10 + static_cast<unsigned long long>(c - '0');
+  }
+  *out = value;
+  return true;
+}
+
+// 查询串原文。httplib 0.60 的 Request 没有 `query` 成员，只有拼在一起的 `target`
+// （路径 + '?' + 查询串），故从这里切一刀。
+//
+// 【为什么切出来的串还要再 URL 解码】httplib 已经把【路径段】解过码，但查询串里的
+// 值保持原样 —— 业务层的 parse_*_query 吃的就是未解码原文（problem_api.h 的注释
+// 明确要求：不合法的转义要报错而不是尽力半解码）。
+std::string query_of(const httplib::Request& req) {
+  const std::size_t mark = req.target.find('?');
+  return (mark == std::string::npos) ? std::string() : req.target.substr(mark + 1);
+}
+
+// 查询串里的数字参数（§5.4 的 from/to）。缺失 / 非法转义 / 非纯数字一律 false。
+// 同名参数【最后一个生效】（§1.5）：先把全部同名项扫完再判数字，而不是见一个就返回。
+bool query_param_id(const std::string& raw_query, const char* key, unsigned long long* out) {
+  bool found = false;
+  std::string value;
+  std::size_t cursor = 0;
+  while (cursor <= raw_query.size()) {
+    const std::size_t amp = raw_query.find('&', cursor);
+    const std::string item = raw_query.substr(
+        cursor, amp == std::string::npos ? std::string::npos : amp - cursor);
+    const std::size_t eq = item.find('=');
+    std::string name = (eq == std::string::npos) ? item : item.substr(0, eq);
+    if (url_decode(name, &name) && name == key) {
+      std::string decoded = (eq == std::string::npos) ? std::string() : item.substr(eq + 1);
+      if (!url_decode(decoded, &decoded)) return false;   // 坏转义：整条查询串不可信
+      value = std::move(decoded);
+      found = true;
+    }
+    if (amp == std::string::npos) break;
+    cursor = amp + 1;
+  }
+  if (!found || value.empty() || value.size() > 19) return false;
+  unsigned long long parsed = 0;
+  for (const char c : value) {
+    if (c < '0' || c > '9') return false;
+    parsed = parsed * 10 + static_cast<unsigned long long>(c - '0');
+  }
+  *out = parsed;
+  return true;
 }
 
 // ---- 端点 ----------------------------------------------------------------------
@@ -234,6 +343,532 @@ void handle_me(const httplib::Request& req, httplib::Response& res) {
   send(common::ok(nlohmann::json::parse(user_payload_json(*user))), res);
 }
 
+// ---- 认证组：改密 / 注销账号（§3.5 / §3.6）--------------------------------------
+
+// POST /api/auth/password → 200 {message}；未登录 1002、旧密码错 1001。
+//
+// keep_token 从 Cookie 里取当前会话的 token：保住这一行是 D-40 的验收点
+// （改密后仍是登录态）。取不到说明会话早已不存在 —— 那时用户拿到的会是 1002
+// 而不是"改密成功但立刻被登出"。
+void handle_change_password(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+
+  const std::optional<std::string> token = parse_sid(cookie_of(req));
+  if (!token.has_value() || token->empty()) {
+    send(common::fail(common::ApiError::kUnauthenticated), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  AuthFailure failure;
+  std::string error;
+  if (!change_password(lease.session(), user.user_id, *token, field_text(body, "oldPassword"),
+                       field_text(body, "newPassword"), &failure, &error)) {
+    send_failure(req, res, failure);
+    return;
+  }
+
+  nlohmann::json data;
+  data["message"] = "密码已修改，其他设备的登录已失效";
+  send(common::ok(data), res);
+}
+
+// DELETE /api/auth/account → 200 {message}。硬删除（D-57），不可恢复。
+// 成功后必须清 Cookie：会话行已被外键连带删掉，但浏览器里那个 sid 还在，
+// 留着会让下一次 auth/me 得到 1002（"服务端已注销、浏览器还以为是登录态"）。
+void handle_delete_account(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  AuthFailure failure;
+  std::string error;
+  if (!delete_account(lease.session(), user.user_id, field_text(body, "password"), &failure, &error)) {
+    send_failure(req, res, failure);
+    return;
+  }
+
+  nlohmann::json data;
+  data["message"] = "账号已注销";
+  send(common::ok(data), res);
+  res.set_header("Set-Cookie", make_clear_cookie());
+}
+
+// ---- 题目组（§4）------------------------------------------------------------------
+
+// GET /api/tags → 200 {algorithm:[…], source:[…]}；匿名可读。
+void handle_tags(const httplib::Request&, httplib::Response& res) {
+  TagGroups tags;
+  std::string error;
+  if (!load_tag_groups(&tags, &error)) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(tags))), res);
+}
+
+// GET /api/problems → 列表。匿名可读；登录时 myProgress / isFavorite 有值。
+// 参数不合法（1001）与"匿名请求带了个人化筛选"（1001）都由业务层判定，
+// 本函数只把 QueryParseError 的 field/reason 原样塞进失败包络。
+void handle_problem_list(const httplib::Request& req, httplib::Response& res) {
+  ListQuery query;
+  QueryParseError invalid;
+  if (!parse_list_query(query_of(req), &query, &invalid)) {
+    send(common::fail(common::ApiError::kInvalidArgument, invalid.field, invalid.reason), res);
+    return;
+  }
+
+  bool server_error = false;
+  const std::optional<AuthUser> user = viewer_of(req, res, &server_error);
+  if (server_error) return;
+
+  // 匿名时 ViewerContext 的 user_id 恒为 0（problem_api.h【user_id = 0 这一个值】），
+  // 于是 SQL 文本在登录/未登录两种情况下【完全相同】，只剩一个参数不同。
+  const ViewerContext viewer = user.has_value() ? viewer_context(*user) : ViewerContext();
+  const ViewerContext* viewer_ptr = user.has_value() ? &viewer : nullptr;
+
+  // 匿名带个人化筛选 → 1001（spec 的明确选择：静默忽略会返回一个"看起来合法但不是
+  // 用户要的东西"的列表）。业务层内部还会再兜一次（纵深防御）。
+  if (!validate_list_query(viewer_ptr, query, &invalid)) {
+    send(common::fail(common::ApiError::kInvalidArgument, invalid.field, invalid.reason), res);
+    return;
+  }
+
+  ProblemList list;
+  std::string error;
+  if (!query_problems(viewer_ptr, query, &list, &error)) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(list))), res);
+}
+
+// GET /api/problems/{slug} → 详情。匿名可读全部题面（[D-43]）。
+// slug 取 req.matches[1]：httplib 已对路径段做过 URL 解码（§1.4「URL 解码后精确匹配」），
+// 这里【不再】解一次 —— 二次解码会把题目标识里合法的 % 字符改写掉。
+void handle_problem_detail(const httplib::Request& req, httplib::Response& res) {
+  const std::string slug = req.matches.size() > 1 ? req.matches[1] : std::string();
+  if (slug.empty()) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+
+  bool server_error = false;
+  const std::optional<AuthUser> user = viewer_of(req, res, &server_error);
+  if (server_error) return;
+
+  const ViewerContext viewer = user.has_value() ? viewer_context(*user) : ViewerContext();
+  const ViewerContext* viewer_ptr = user.has_value() ? &viewer : nullptr;
+  ProblemDetail detail;
+  std::string error;
+  const DetailStatus status = load_problem_detail(slug, viewer_ptr, &detail, &error);
+  if (status == DetailStatus::kNotFound) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+  if (status == DetailStatus::kError) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(detail))), res);
+}
+
+// POST /api/problems/{slug}/favorite → 200 {isFavorite}；必须登录。
+void handle_favorite(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  const std::string slug = req.matches.size() > 1 ? req.matches[1] : std::string();
+  if (slug.empty()) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  bool is_favorite = false;
+  FavoriteStatus status = FavoriteStatus::kError;
+  std::string error;
+  if (!toggle_favorite(lease.session(), user.user_id, slug, &is_favorite, &status, &error)) {
+    if (status == FavoriteStatus::kNotFound) {
+      send(common::fail(common::ApiError::kNotFound), res);
+      return;
+    }
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+
+  nlohmann::json data;
+  data["isFavorite"] = is_favorite;
+  send(common::ok(data), res);
+}
+
+// ---- 提交组（§5）-------------------------------------------------------------------
+
+// POST /api/submissions → 201 {submissionId, status, queueAhead}。
+//
+// 【判题闸门放在建行之前】：judge 没起来时回 1009 且【不落库】。反过来（先建行再回 1009）
+// 会在库里留下一批永远 pending 的死提交，前端会拿着 submissionId 一直轮询下去。
+void handle_submission_create(const httplib::Request& req, httplib::Response& res) {
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+
+  const std::string slug = field_text(body, "problemSlug");
+  if (slug.empty()) {
+    send(common::fail(common::ApiError::kInvalidArgument, "problemSlug", "缺少题目标识"), res);
+    return;
+  }
+  std::string language = field_text(body, "language");
+  if (language.empty()) language = "cpp";   // §5.1：默认 "cpp"（首版只支持 C++）
+  const std::string code = field_text(body, "code");
+  if (code.empty()) {
+    send(common::fail(common::ApiError::kInvalidArgument, "code", "代码不能为空"), res);
+    return;
+  }
+  if (code.size() > common::config().max_code_bytes) {
+    send(common::fail(common::ApiError::kInvalidArgument, "code",
+                      "代码长度超出上限（" +
+                          std::to_string(common::config().max_code_bytes) + " 字节）"),
+         res);
+    return;
+  }
+
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  const bool judge_ready = judge_available();
+  CreatedSubmission created;
+  LookupStatus status = LookupStatus::kFound;
+  std::string error;
+  if (!create_submission(lease.session(), user.user_id, slug, language, code, judge_ready, &created,
+                         &status, &error)) {
+    if (status == LookupStatus::kNotFound) {
+      send(common::fail(common::ApiError::kNotFound), res);
+      return;
+    }
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  if (!judge_ready) {
+    // 判题器没起来：slug 已验过（1004 仍可正常报），但【不建行】——
+    // 建了行也没人来判，库里会留下一批永远 pending 的死提交。
+    send(common::fail(common::ApiError::kJudgeUnavailable), res);
+    return;
+  }
+  send(common::created(nlohmann::json::parse(to_json(created))), res);
+}
+
+// GET /api/submissions → 提交历史列表（仅本人）。
+void handle_submission_list(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  SubmissionQuery query;
+  QueryParseError invalid;
+  if (!parse_submission_query(query_of(req), &query, &invalid)) {
+    send(common::fail(common::ApiError::kInvalidArgument, invalid.field, invalid.reason), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  SubmissionList list;
+  std::string error;
+  if (!load_submissions(lease.session(), user.user_id, query, &list, &error)) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(list))), res);
+}
+
+// GET /api/submissions/diff?from=&to= → 两段代码原文（仅本人两条）。
+void handle_submission_diff(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  unsigned long long from_id = 0;
+  unsigned long long to_id = 0;
+  const std::string raw_query = query_of(req);
+  const bool from_ok = query_param_id(raw_query, "from", &from_id);
+  const bool to_ok = query_param_id(raw_query, "to", &to_id);
+  if (!from_ok) {
+    send(common::fail(common::ApiError::kInvalidArgument, "from", "from 必须是纯数字的提交 id"), res);
+    return;
+  }
+  if (!to_ok) {
+    send(common::fail(common::ApiError::kInvalidArgument, "to", "to 必须是纯数字的提交 id"), res);
+    return;
+  }
+  if (from_id == to_id) {
+    send(common::fail(common::ApiError::kInvalidArgument, "from", "from 与 to 不能是同一条提交"), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  DiffSide from;
+  DiffSide to;
+  LookupStatus status = LookupStatus::kFound;
+  std::string error;
+  if (!load_submission_diff(lease.session(), user.user_id, from_id, to_id, &from, &to, &status,
+                            &error)) {
+    if (status == LookupStatus::kNotOwned) {
+      send(common::fail(common::ApiError::kForbidden), res);
+      return;
+    }
+    if (status == LookupStatus::kNotFound) {
+      send(common::fail(common::ApiError::kNotFound), res);
+      return;
+    }
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(from, to))), res);
+}
+
+// GET /api/submissions/{id} → 提交详情（仅本人）。归属写进 WHERE（§5.2）。
+void handle_submission_detail(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  unsigned long long id = 0;
+  if (!path_id(req, 1, &id)) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  SubmissionDetail detail;
+  LookupStatus status = LookupStatus::kNotFound;
+  std::string error;
+  if (!load_submission_detail(lease.session(), user.user_id, id, &detail, &status, &error)) {
+    if (status == LookupStatus::kNotOwned) {
+      send(common::fail(common::ApiError::kForbidden), res);
+      return;
+    }
+    if (status == LookupStatus::kNotFound) {
+      send(common::fail(common::ApiError::kNotFound), res);
+      return;
+    }
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(detail))), res);
+}
+
+// DELETE /api/submissions/{id} → 200 {message}（仅本人；admin 不放开）。
+void handle_submission_delete(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  unsigned long long id = 0;
+  if (!path_id(req, 1, &id)) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  LookupStatus status = LookupStatus::kNotFound;
+  std::string error;
+  if (!delete_submission(lease.session(), user.user_id, id, &status, &error)) {
+    if (status == LookupStatus::kNotOwned) {
+      send(common::fail(common::ApiError::kForbidden), res);
+      return;
+    }
+    if (status == LookupStatus::kNotFound) {
+      send(common::fail(common::ApiError::kNotFound), res);
+      return;
+    }
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+
+  nlohmann::json data;
+  data["message"] = "提交记录已删除";
+  send(common::ok(data), res);
+}
+
+// POST /api/submissions/{id}/retry → 201 {newSubmissionId}。
+//
+// judge 未接线时传 create=false：归属（1003）/ 状态（1011）照常判定，但**不建行**
+// —— 否则会在判题器缺席时留下永远 pending 的死提交。
+void handle_submission_retry(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  unsigned long long id = 0;
+  if (!path_id(req, 1, &id)) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  unsigned long long new_id = 0;
+  bool retryable = false;
+  LookupStatus status = LookupStatus::kNotFound;
+  std::string error;
+  const bool judge_ready = judge_available();
+  if (!retry_submission(lease.session(), user.user_id, id, judge_ready, &new_id, &status, &retryable,
+                        &error)) {
+    if (status == LookupStatus::kNotOwned) {
+      send(common::fail(common::ApiError::kForbidden), res);
+      return;
+    }
+    if (status == LookupStatus::kNotFound) {
+      send(common::fail(common::ApiError::kNotFound), res);
+      return;
+    }
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  if (!retryable) {
+    send(common::fail(common::ApiError::kStateNotAllowed, "", "只有失败的提交可以重跑"), res);
+    return;
+  }
+  if (!judge_ready) {
+    send(common::fail(common::ApiError::kJudgeUnavailable), res);
+    return;
+  }
+
+  nlohmann::json data;
+  data["newSubmissionId"] = new_id;
+  send(common::created(data), res);
+}
+
+// ---- 统计组（§6）--------------------------------------------------------------------
+
+// GET /api/stats → 四个标量（必须登录）。
+void handle_stats(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  UserStats stats;
+  std::string error;
+  if (!load_user_stats(lease.session(), user.user_id, &stats, &error)) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(stats))), res);
+}
+
+// GET /api/me/overview → 概览条与"我的"tab2 的唯一数据源（必须登录）。
+void handle_overview(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+
+  UserOverview overview;
+  std::string error;
+  if (!load_user_overview(lease.session(), user.user_id, &overview, &error)) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(overview))), res);
+}
+
+// ---- 管理（§7）-------------------------------------------------------------------------
+
+// GET /api/admin/overview → 只读管理面板。先判登录（1002）再判角色（1003），
+// 顺序由 admin::require_admin 保证，不可颠倒（§7.1）。
+//
+// judge 快照走 unwired_status_provider()：judge 未接线时如实报 false + 三个 0，
+// 运维必须一眼看出判题没起来，而不是"假装一切正常"。
+void handle_admin_overview(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_viewer(req, res, &user)) return;
+
+  const GuardResult guard = require_admin(std::optional<AuthUser>(user));
+  if (guard == GuardResult::kUnauthenticated) {
+    send(common::fail(common::ApiError::kUnauthenticated), res);
+    return;
+  }
+  if (guard == GuardResult::kForbidden) {
+    send(common::fail(common::ApiError::kForbidden), res);
+    return;
+  }
+
+  Overview overview;
+  std::string error;
+  if (!build_overview(unwired_status_provider(), &overview, &error)) {
+    send(common::fail(common::ApiError::kInternalError), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(overview))), res);
+}
+
 // ---- 收口 ----------------------------------------------------------------------
 
 // 访问日志：一个请求一行，够定位"点了哪个按钮"又不够淹没 app.log。
@@ -321,8 +956,9 @@ std::optional<ErrorRouting> error_reply_for(int status, bool body_already_writte
       // "资源不存在"，端点不存在是它的近亲；前端只需区分"这个 API 没了"。
       return ErrorRouting{common::fail(common::ApiError::kNotFound), false};
     case 405:
-      // 方法不被接受。httplib 的兜底错误处理器会对"路径存在但方法不对"回 405；
-      // 对前端而言这仍然是"你要用的东西不存在"，故与 404 同码。
+      // 方法不被接受。本项目的 httplib（0.60）不会自己造 405 —— 它对"路径存在但方法
+      // 不对"回的是 404，故这个分支目前不可达（与 413 同理，见 API.md §1.7）。
+      // 保留它是为了将来换一个会回 405 的版本时行为不变；对前端而言仍是"不存在"。
       return ErrorRouting{common::fail(common::ApiError::kNotFound), false};
     case 413:
       // 请求体超限（例如 §5.8 的代码上限被 httplib 的 payload_max_length 抢先拦下）。
@@ -343,6 +979,30 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
   server.Post("/api/auth/login", handle_login);
   server.Post("/api/auth/logout", handle_logout);
   server.Get("/api/auth/me", handle_me);
+  server.Post("/api/auth/password", handle_change_password);
+  server.Delete("/api/auth/account", handle_delete_account);
+
+  // 题目组（匿名可读；/favorite 必须登录，由处理器自己判）
+  server.Get("/api/tags", handle_tags);
+  server.Get("/api/problems", handle_problem_list);
+  // {slug} 写在 /favorite 之后：httplib 按注册顺序匹配，
+  // `[^/]+` 不会吃掉带斜杠的尾巴，但显式顺序让读代码的人不必推演这一点。
+  server.Post(R"(/api/problems/([^/]+)/favorite)", handle_favorite);
+  server.Get(R"(/api/problems/([^/]+))", handle_problem_detail);
+
+  // 提交组。id 段收窄成 [0-9]+ 是有意的：/api/submissions/diff 因此不会被
+  // /api/submissions/{id} 抢走（"diff" 含非数字），顺序也就不必成为正确性的一部分。
+  server.Post("/api/submissions", handle_submission_create);
+  server.Get("/api/submissions", handle_submission_list);
+  server.Get("/api/submissions/diff", handle_submission_diff);
+  server.Get(R"(/api/submissions/([0-9]+))", handle_submission_detail);
+  server.Delete(R"(/api/submissions/([0-9]+))", handle_submission_delete);
+  server.Post(R"(/api/submissions/([0-9]+)/retry)", handle_submission_retry);
+
+  // 统计组与 admin
+  server.Get("/api/stats", handle_stats);
+  server.Get("/api/me/overview", handle_overview);
+  server.Get("/api/admin/overview", handle_admin_overview);
 
   // 静态挂载放在【最后】：httplib 优先匹配已注册的路由，
   // 顺序反了也不会被静态文件抢走 /api/*，但显式写在最后能让读代码的人一眼看出

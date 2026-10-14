@@ -148,6 +148,8 @@ set(OJCORE_SOURCES
     src/web/ratelimit.cpp
     src/web/routes.cpp
     src/web/session.cpp
+    src/web/submission_api.cpp
+    src/web/user_api.cpp
 )
 
 add_library(ojcore STATIC ${OJCORE_SOURCES})
