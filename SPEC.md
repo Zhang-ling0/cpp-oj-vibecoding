@@ -2430,7 +2430,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **三道「响亮地失败」**：DDL 文件读不到 / 切不出任何 `CREATE TABLE` / 切出条数与实际执行条数不等 / 表没真的建出来 —— 任一命中都打印人可读原因并 `exit(1)`，而不是留一张半套的库让 T1.2 去炸
   - 表名**从 DDL 文本里扫出来**而非写死 11 个：写死就多出一份必须手工同步的副本，漂移无声。切分复用 T3.1 的 `db::split_statements()`（同一套去注释规则）—— 若自己扫原文，本文件头部注释里出现的 `CREATE TABLE` 字样会被误当成一条建表语句（**本轮实际踩到过**）
   - 空库 → 11 张表、二次启动幂等，均已实测；`db/reset.sql` 保持不动（它不能进 `init/`，否则首启建完表又删掉）
-- [ ] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
+- [√] T0.4 `common/`：`config.h`（环境变量读取）、`log.h`（双文件按天切割 logger）、`response.h`（响应包络）、`errors.h`（错误码枚举）
   - `config.h` 新增两个变量 `[D-37]`：`OJ_ALLOW_REGISTER`（默认 1，0 = 关闭注册端点）、`OJ_ADMIN_USERNAMES`（逗号分隔；**须区分「未设置」与「空串」**，见 §6.3.1 约束 1）
   - 配 `.env` 文件并在 README（T5.6）中说明这两个变量的作用
   - **已完成 `config.h`/`.env` 部分**：`tests/config_test.cpp` 45 条单测全绿
@@ -2441,8 +2441,32 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
       - 判别力已实测：把两处修复各自退回后，`TimestampSecondsAndMillisComeFromOneClockRead` / `LineStampAndItsFileDateNeverDisagreeAcrossMidnight` / `RetentionAlsoDeletesSequenceSuffixedRotatedFiles` 三条立即变红
       - 为此给 `log_test_set_time()` 加了可选的 `millis` 参数：早先覆盖时钟时毫秒被写死 0，等于把"两次读取"这件事藏了起来，真实时钟下它只在秒边界那一瞬发生（每晚一行），不给出可冻结的毫秒值就无从单测
     - **回归**：`ctest --test-dir build` **320/320 通过**；`-DOJ_SANITIZE=address,undefined` 下同样 **320/320 通过**（构建 `-j1`）
-  - **`errors.h` 已开工**（T3.3 轮补上：§6.3 的 20 个码 + `http_status()` + `message()`，`2xxx` 段一律映射 200）；`response.h`（统一包络）仍未开工，故本条**不勾选**
-- [ ] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
+  - **`errors.h` 已完成**（T3.3 轮补上：§6.3 的 20 个码 + `http_status()` + `message()`，`2xxx` 段一律映射 200）
+  - **`response.h` 已完成**（本轮补上，T0.4 的最后一块）：`include/common/response.h` + `src/common/response.cpp`，四个入口 `ok()` / `created()` / `fail()` ×2 / `fail_with_data()`，包络一律由 `nlohmann::json` dump 而非手工拼串
+    - **四个入口而不是一个带一堆默认参数的**：失败的两条路（只有码 / 带 `data.field`+`data.reason`）在 §6.3 里是两种**不同的响应体**，用默认参数合并会让"忘了传 field"产出一个 `"field":""` 的半截数据，而前端按 `data.field` 决定把红字挂到哪个输入框下 —— 空串会让它两处都不挂又都像挂了。故 `field` 为空时**退化成只带码的形态**
+    - **`created()` 单列**：§6.3 端点表写死注册成功是 **201**，而 `errors.h` 的 `kOk` 是 200。不给 `http_status` 加"看端点决定"的参数 —— 那会把"哪个端点返回 201"的决定权散到全部端点里。现状只有注册一个调用方，加第二个时该重新想一次
+    - **`data` 永远是对象**：成功无内容时给 `{}`、失败无字段时给 `{}`，绝不省略。前端 `api.js` 因此可以无条件读 `data.field`，不必在每个调用点写 `data ?? {}` —— 那个兜底一旦散到十几处就会有一处漏
+    - **`Content-Type` 由 `write_body()` 无条件覆盖**：静态文件 404 走 httplib 的 error handler，那条路径上响应里可能已带着 `text/html`，不覆盖就会让"按 content-type 分流的工具"把一段 JSON 误判
+    - **HTTP 状态码一律转调 `errors.h::http_status`，本文件不存第二份映射表** —— `[D-29]` 要求两者同步，两份表迟早对不上一处，而这种漂移不会崩，只会让 curl 拿到的状态码与业务码矛盾
+    - **⚠️ 本轮新写单测时立刻查出两处真问题（都不是"测试没过"，是"代码与注释/契约不符"）**：
+      ① **键序注释是错的**：注释写"顺序即输出顺序（nlohmann 默认按插入序）"，实测字节序是 `code → data → message`（`json` 用 `std::map` 存对象，输出按**字典序**）。`tests/response_test.cpp` 的 `SuccessUsesTheExactBytesOfSection63` 逐字节断言把它抓了出来。**没有改用 `ordered_json` 也不手工拼串** —— 那要么换掉全项目共用的 json 类型，要么把转义责任接回包络层（本文件用 nlohmann 正是为了不做后者）
+      ② **`fail(err, "", reason)` 会把 reason 静默丢掉**（真 bug）：早先的耦合写法是"field 为空就整体退化成 `fail(err)`"，而 `routes.cpp` 的 **413 分支恰好走这条路径**（field 空 + reason = 「请求体超出允许的大小」）——**那句文案从未真正到达客户端**。`send_failure()` 把 `AuthFailure` 的两个字段原样递进来，而服务端原因（DB 报错摘要）**只填 reason 不填 field**，所以这不是理论问题。改为**两个键各自可选**，两个都空才退化成 `fail(err)`
+    - **单测** `tests/response_test.cpp` **17 条**（纯计算、无 DB、不碰网络，故**连不上 mysqld 的机器上照跑不误**）：包络逐字节形状 / `created()`=201 与 `ok()`=200 的差异 / 11 个失败码的 HTTP 状态逐行核对 §6.3 / **两条退化分支**（field 空→不产出该键但保留 reason；reason 空→不产出该键）/ `data` 传 array/null/string/number **恒为对象**的不变量 / reason 含 `"` `\` 换行 `<script>` 时输出仍是合法 JSON / 三个契约键不多不少 / 20 个码表逐行 / **2xxx 段一律 200**（`[D-29]`）
+  - **本条勾选**：四个文件（config / log / errors / response）全部落地且各自有单测或 curl 级验收；README 说明（T5.6）尚未写，随 T5.6 一并补
+- [√] T0.5 httplib 起服务，静态文件映射跑通 `list.html`
+  - **已完成 `include/web/routes.h` + `src/web/routes.cpp`**：httplib 0.60.1（`[D-72]` v1.9 真源）起服务、静态挂载、§6.3 **认证组四端点**接线（`register`/`login`/`logout`/`me`）
+  - **验收按本条原文勾选的实测**：`make run` 后 `curl -i localhost:8080/login.html` → **200**（3841 字节）、`/css/app.css` `/js/api.js` `/js/auth.js` `/js/common.js` 均 200。⚠️ **`list.html` 本身仍是 0 字节（T4.3 未开工）**，故本条的"跑通 `list.html`"只兑现了"静态文件映射链路通了"，页面内容待 T4.3；**登录成功后跳 `/list.html` 会看到 1004 包络，这是 T4.3 的欠账，不是路由缺陷**
+  - **`main.cpp` 已推进到 §2.3 第 8 步**（第 9~10 步角色同步 / judge 仍未接线），且**本进程自此常驻阻塞** —— 在此之前 `make run` 跑完就退出，那正是本条验收的前提
+  - **`SIGINT`/`SIGTERM` 两个信号接到 `web::stop_server()`**，listen 被打断后按「log → 连接池 shutdown → 日志 shutdown」的正常顺序收尾。信号处理器里**只调这一个函数、不写日志不加锁**（`std::signal` 的平台实现决定了加锁会在处理器里死锁）；实测 `Ctrl-C` 后日志里依次出现「收到停止信号」与「MySQL 连接池已关闭」，退出码 0
+  - **线程池写死 8 而不是读 `config().http_threads`**：`CPPHTTPLIB_THREAD_POOL_COUNT` 是 httplib.h 的**编译期宏**，而 `http_threads` 是运行期配置。两者恰好都是 8（§2.3 的 N=8、config 默认值）但**不是同一件事**，宏改的是每个 HTTP 线程 8MB 的**虚拟**栈；把不同步这件事写在 routes.h 里而不是留成隐含假设（§0.0 提醒过别过量申请虚拟内存：8×8MB=64MB 虚拟、不是常驻）
+  - **两处收口只有这一处**（`set_error_handler` + `set_exception_handler`），但**收口的判据是「body 为空」而不是「status == 404」**：
+    - httplib 对**任何 `status >= 400`** 的响应都会调 error handler，**包括我们自己的业务错误**。按"凡是 4xx 就重写包络"写，会把每一个 1002 未登录 / 1005 用户名已注册改写成 1004 —— 症状是"未登录时 `auth/me` 永远返回资源不存在"，前端连"要不要跳登录页"都判断不了。这个坑**实测踩到过**：首版按 status 判，`GET /api/auth/me` 实测返回 `404 {"code":1004}` 而非 `401 {"code":1002}`
+    - httplib 自己造的 404/400/413 有一个共同且唯一的特征：**body 从未被填过**。于是判据成了"body 为空 ⇒ 这不是我写的响应，交给收口；否则返回 `Unhandled` 原样放过"
+  - **不做「未知路径 → index.html」的重定向**：`/` 已被静态挂载占住且 httplib 对不存在的静态文件返回 404、不回落任何首页。五页前端靠**显式文件名链接**（顶栏「题库」→ `/list.html`、登录成功也跳 `/list.html`）而不是那条常见规则 —— 它会让 `/api` 的拼写错误也返回 200 + HTML，curl 验收时看不出端点不存在，错的反而更难查
+  - **【先 send 后 set_header】是硬顺序**：登录的 `Set-Cookie` 在包络写完之后追加。一旦有人给 send 加上"统一清头"的行为，Cookie 会被抹掉，而症状是"登录返回 200 但永远未登录"，极难查
+  - **分层与既有三条业务层一致**：本文件不含任何 SQL / 校验规则 / bcrypt，只做「HTTP 语法 → 业务层调用 → 包络」。四道闸门在 `auth_api.h`、会话签发回收在 `session.h`、包络在 `response.h`，故这三层各自的可测性互不影响
+  - **curl 验收实测**（`curl -s -o /dev/null -w '%{http_code}'`）：未登录 `auth/me` → **401**（包络 `code=1002`）/ 重复用户名注册 → **409**（`1005`）/ 弱密码注册 → **400**（`1001`）/ 错密码登录 → **400**（`1001`）/ 登录 → **200** + `Set-Cookie: sid=<64 hex>; HttpOnly; SameSite=Lax; Path=/`（逐字符合 `[D-69]`）/ 带 Cookie 的 `auth/me` → **200** / 登出 → **200** / 登出后用旧 Cookie → **401** / 未知端点 → **404**（`1004`）/ 请求体非 JSON → **400**。**AC-1 的四条（1005 / 1001 / Cookie 维持会话 / 登出后 1002）全部达成**
+  - **仍待接线**（本条已勾选但不是全做完）：§6.3 其余 16 个端点（T3.6~T3.18）逐个**追加**到同一个 `register_routes()`；`purify.min.js` 仍是 43 字节的下载失败占位文件（T0.6）
 - [ ] T0.6 **vendored 前端库接入** `[D-73]`
   - 5 个 CodeMirror 文件按 **`defer` + 依赖顺序**引入（见 §6.1 末尾的加载顺序说明）
   - 页面内断言 `typeof CodeMirror !== 'undefined' && CodeMirror.modes.clike` —— **C++ 模式没加载时要立刻报错**，不能等到用户发现没高亮
@@ -2450,8 +2474,10 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **已落盘 6 / 7 个文件**：`static/vendor/cm/` 下 5 个 CodeMirror（核心 174KB + clike 模式 + 3 个 addon）与 `marked.min.js`（35KB），实测 `codemirror.min.js` 里 `clike` 出现 **0** 次（印证 §6.2 尾注"核心不含语言模式"，因此 5 个文件缺一不可）
   - **`purify.min.js` 只有 43 字节**，内容是 `Failed to fetch version info for DOMPurify.` —— 下载失败留下的占位文件，**不是** DOMPurify（§6.7.2 的 `curl` 那一步没成功）。**T4.6 的 XSS 过滤在它被换成真库之前不能算数**
   - **`LICENSES/` 目录尚未创建**（三个 MIT LICENSE）
-  - **五条 HTML 仍是 0 字节**（`login/list/problem/history/admin.html`），故"页面内断言"与加载顺序都无处落地 —— 本条的真正工作量在 T4.1~T4.5，**这是 T4 的前置依赖，不是 T0.6 单独能做完的事**
+  - **HTML 已不再是"全部 0 字节"**：`login.html` 随 T4.2 落地（它**不需要** CodeMirror/marked/purify，故对 T0.6 无依赖）；`list/problem/history/admin.html` 仍是 0 字节。**本条的真正工作量在 T4.1~T4.5 —— 这是 T4 的前置依赖，不是 T0.6 单独能做完的事**：题目页要同时引用那 5 个 CodeMirror 文件，`purify.min.js` 在换成真库前 §7.3 的 XSS 过滤也不能算数
 - [ ] **验收**：`make run` 后浏览器访问 `localhost:8080` 看到页面；`./logs/app.log` 正常输出；**编辑器有 C++ 高亮**（目视 + 上面那条断言）
+  - **前两项已达成**（随 T0.5 落地）：浏览器打开 `localhost:8080/login.html` 看到登录页；`./logs/app.log` 逐请求输出访问行（`POST /api/auth/login → 400` 这种）与启动回显
+  - **第三项仍不成立**：题目页（`problem.html`）还是 0 字节，CodeMirror 那 5 个文件还没有任何页面引用 —— 这一项与 T4.1~T4.5 同批落地
 
 ### M1 — 题库与生成器（Day 3–6）★ 最高风险
 
@@ -2576,7 +2602,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **1010 那条分支原先写不出用例，处置是【把策略做成递进来的值】而不是改 config**：`common::config()` 是进程级只读快照、`load_config()` 只能整体重载一次，单测改它会污染同进程其它模块的结论。故新增 `RegisterPolicy{allow_register}`，生产入口 `register_user(...)` 内部读 `config()` 填它（.env 仍是唯一真源，`§6.3.1` 的声明式取向不变），单测递 `false`。用例同时钉住了**开关先于参数校验**——挪到校验之后的话，注册关闭状态下"用户名为空"会回 1001，外部就能靠错误码反推出"这里曾经开放注册"
   - **回归**：`ctest --test-dir build` **377/377 通过**（本轮新增 31 条；唯一跳过的 `LoaderTest.DatabaseFailureRollsBack…` 是 MySQL 账号缺 `SUPER` 建不了触发器，早于本轮）
   - **⚠️ 一处【刻意不覆盖】的分支**：并发注册撞 `uk_username` 的 1062 → 1005。`[D-21]` 的全局互斥量让同进程两个线程必然串行，后到者的判重查询必然看到已插入的那行，因此**在本项目的线程模型下这条分支不可达**，要造出来只能靠注入时序的测试钩子。它的兜底价值也低（判重 + 唯一索引已是双重保证），故不写一条永真的用例充数；将来若 `Pool::size > 1` 让 DB 访问真正并行，这条分支会变为可达，届时必须补测
-  - **本条已勾选**，但 HTTP 侧仍未接线：路由与统一包络（T3.5，`common/response.h` 尚未开工）、`Set-Cookie` 头真正落到响应上（T0.5 起 httplib）、`OJ_ALLOW_REGISTER=0` 的 1010 用例需要可注入的配置（当前真库组跑在 `allow_register` 的内置默认值 `true` 下）
+  - **本条已勾选**。**HTTP 侧已在 T0.5 一轮接线完毕**：`common/response.h` 已有统一包络，`Set-Cookie` 头经 `web/routes.cpp` 真正落到响应上（实测 `sid=<64 hex>; HttpOnly; SameSite=Lax; Path=/`，逐字符合 `[D-69]`），四个端点均可 `curl` 走通（AC-1 四条全部达成，见 T0.5 条目）。**唯一仍未覆盖的**是 `OJ_ALLOW_REGISTER=0` 的 1010 端到端用例 —— 需要改 `.env` 重启才能触发，而真库组跑在 `allow_register` 的内置默认值 `true` 下；该分支的业务层已有单测（`RegisterPolicy{false}` 递进），只是没有 HTTP 层的验收
 
   - **已完成会话/Cookie 层 `include/web/session.h` + `src/web/session.cpp`**（bcrypt 与注册/登录端点已由同一条目的后续条目补齐，见上）：
     - **五个纯函数**（不碰 DB，永远可单测）：`generate_token()`（`RAND_bytes` 32 字节 → 64 小写 hex）、`is_token_wellformed()`、`parse_sid()`、`make_set_cookie()`、`make_clear_cookie()`。`Set-Cookie` 逐字为 `sid=…; HttpOnly; SameSite=Lax; Path=/`（§6.3 / `D-69`），**故意不加 `Secure`**（明文 HTTP 下加了永不下发），欠账与启用 HTTPS 时的三条动作见 §6.3.2.1
@@ -2590,6 +2616,16 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
     - **仍待接线**（本轮已补齐 ①）：② 启动时调一次 `purge_expired()`（T3.9）；③ `ratelimit::forget(user_id)` 与注销联动（T3.18 `D-70`）
 - [ ] T3.4 限流器：每用户 60s 滑动窗口 + 同时评测数配额
 - [ ] T3.5 路由：§6.3 全部端点 + 统一包络 + 错误码映射
+  - **已落地：统一包络 + 认证组四端点**（随 T0.5 一并完成，详见 T0.5 条目 —— 路由层 `web/routes.cpp` + 包络 `common/response.cpp`）
+  - **本条【不勾选】**：§6.3 的 20 个端点里目前只接线了 4 个，题目组（T3.6）、提交组（T3.7/T3.8/T3.15/T3.16）、admin（T3.12）、改密（T3.13）、注销（T3.18）都还是"业务层已就绪、路由未接线"
+  - **`web/admin.h` 自带的 `error_code_of`/`error_message_of` 暂未改动** —— 它们与 `errors.h` 对同一码给出同样的结果，故不构成不一致；等本条把第 5 个端点接上去时统一转调，避免中途改两处
+  - **错误收口的判据已抽成纯函数 `web::error_reply_for(status, body_already_written)` 并被单测钉住**（`ErrorRouting{reply, protocol_level}`）
+    - **为什么必须抽**：判据一旦与日志、switch、httplib 类型写在一起，就只能靠 curl 人工比对 —— 而**本轮真的在这个判据上踩过**（见 T0.5 条目：`auth/me` 未登录实测回 `404/1004` 而不是 `401/1002`）。修完是"一句话规则"，但"一句话"不等于"改不掉"
+    - **`protocol_level` 随决策一起返回，而不是让调用方重推一次状态码集合**：重推就要在 `routes.cpp` 里再写一遍 `{404,405,413}`，两处白名单各改一处就分叉（§8.1.1 的通则）
+    - **单测** `tests/routes_test.cpp` **12 条**（**不起服务、不 listen、不占端口、不碰 MySQL** —— 这批用例在"mysqld 没起"和"8080 被占"的机器上都照跑不误，刻意不同于 mysql_pool_test / auth_api_test 的真库组，那两组没库就跳过，于是"全绿"可能只是全跳过）
+      - ⭐ **`BelowABodyWeAlreadyWroteIsNeverRewritten`**：body 非空 ⇒ **任意** status（含 200/418/451 这些"不常见的"）一律放过。这就是那个 bug 的钉子
+      - **判别力已实测**：把判据退回 `if (status != 404) return std::nullopt;` 后 **8/12 条立即变红**，且关键那条的失败信息直接点名后果（"未登录 auth/me 会因此从 1002 变成 1004（AC-1 的会话断言会塌）"）
+      - 另钉：空 body 恒得包络 / 404·405→1004 / **413→1001 且保留人话 reason**（即上面那个真 bug）/ 协议级 status 恒→1001 且 `protocol_level=true` / 显式认识的三种不标协议级 / **`EveryBranchAgreesWithTheErrorTable` 是关系式断言**（HTTP 状态恒等于包络码的 `http_status`，加新分支也不会漏）/ 静态目录缺失 ⇒ `register_routes` 返回 false、真目录 ⇒ true、同一 Server 注册两次仍 true
 - [ ] T3.6 列表查询：多条件筛选 + 分页 + JOIN 进度与收藏
   - **已完成业务层 `include/web/problem_api.h` + `src/web/problem_api.cpp`**：`GET /api/problems`（keyword / difficulty / tags / progress / favorite / sort / page / size）、`GET /api/tags`、`GET /api/problems/{slug}` 三个端点的"算什么、要几条 SQL、失败时怎么退"，camelCase 契约由 `to_json()` 独家序列化。SQL 随业务层走而**不**进 `db/dao.h`，与 T3.12 同一取舍（dao.h 尚空，T3.2 落地时再把聚合语句收敛进 problem 组）
   - **查询串解析是纯函数**（`parse_list_query` / `url_decode` / `validate_list_query`）：枚举值非法一律 1001 并指名 field（静默回退会让用户拿到"看起来筛了其实没筛"的列表）；未知参数名忽略；同名参数最后一个生效；`size` 超上限夹到 100（`kMaxPageSize`，封顶串行化 DB 上的单次大查询，响应回显实际生效值）
@@ -2600,7 +2636,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - 标签筛选用**逐标签一个 EXISTS**（AND 语义 = 同时挂全部所选标签），不用 JOIN+DISTINCT：JOIN 会把题乘以标签数，`LIMIT/OFFSET` 就在乘完的结果上取，第 2 页直接漏题
   - 关键词 LIKE 的 `% _ \` 全部转义并显式写 `ESCAPE`（用户搜 `100%` 时 `%` 必须当字面量）；四个排序方案都以 `p.id ASC` 收尾 —— 少一个稳定 tiebreaker，"翻页不重不漏"会偶发漏题
   - **单测** `tests/problem_api_test.cpp` **63 条全绿**（纯逻辑 34 + 真库 29；连不上 MySQL 时真库组整体 `GTEST_SKIP`），`-DOJ_SANITIZE=address,undefined` 尚未重跑（本机 LSan 受限，见根 `CMakeLists.txt` 注释）
-  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，`common/response.h` 未开工 —— `errors.h` 已由 T3.3 补上；`to_json()` 只产出 data 块）；② Cookie → 登录上下文（T3.3 已提供 `web::authenticate()`，`ViewerContext*` 由会话层递进来）；③ 收藏切换端点（`POST /api/problems/{slug}/favorite` 属 T4.9 的后端，本轮未做）
+  - **本条仍不勾选**，两处待接线：① 路由接线 —— 统一包络（`common/response.h`）与 Cookie → 登录上下文（T3.3 的 `web::authenticate()`）**均已就绪**（T0.5 已把它们用在认证组四端点上），但 `GET /api/problems` 本身还没挂进 `register_routes()`；② 收藏切换端点（`POST /api/problems/{slug}/favorite` 属 T4.9 的后端，未做）
 - [ ] T3.7 提交端点：校验 → 落库 pending → 入队 → 返回 201
 - [ ] T3.8 提交详情端点：仅本人可见 + 按 §6.3 的三步组装 `caseResults` / `compileErrors`
   - `submission_case_results` 按 `case_idx ASC`；`submission_compile_errors` 按 `seq ASC`
@@ -2614,6 +2650,9 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **「每次登录时一次」已并入 `session::issue()`**（同事务内回收 + 插入，§6.3.2 的约束），所以登录端点只需调它一个入口
   - **边界语义已在单测里钉死**：`expires_at == 当前秒` 的行**不被回收**（语句是 `<`）但**已不能登录**（查询是 `>`）—— 两条语句在同一秒上给出互补答案；改任一侧的比较符都会红
   - **仍待接线**：T3.9 启动顺序里的那一次调用（本模块只提供函数，没有调用点）
+    - **✅ 已接线（本轮，随 T0.5 一起）**：`main.cpp` 在「工作区扫残」之后、「HTTP listen」之前调一次 `purge_expired()`，即 §2.3 启动顺序的第 7 步。管的是"服务停了三天再起来"那一段 —— 那些行没人会去登录，也就没人会触发登录时的回收
+    - **失败只记 WARN 不拒绝启动**：查会话的 SQL 自带 `expires_at > UTC_TIMESTAMP()`，过期会话本来就查不出来；回收失败不影响任何在线功能，而"起不来"比"多留几行过期会话"严重得多
+    - 启动回显里带上本轮回收条数（实测 `已回收过期会话 0 条`），回收彻底不工作时至少有一条可 grep 的证据
   - **`EXPLAIN` 已实测（8.0.46）**：回收语句 `type=range / key=idx_expire`（正是本条要求的形态，无需新增索引）；`find_user()` 的 JOIN 两侧都是 `type=const`（token 走 PRIMARY、user_id 走 PRIMARY 常量折叠）
 - [ ] T3.11 角色同步（§6.3.1）`[D-37]`
   - 4 条约束逐条落地：未设置则跳过 / 双向同步 / 缺失用户名逐个 WARN / 同步后回显名单
@@ -2626,7 +2665,7 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - **锁顺序**：先取 scheduler 快照并释放其锁，再取 `DB mutex` 查 DB；禁止 `DB mutex → scheduler lock` 嵌套
   - **已完成业务层 `include/web/admin.h` + `src/web/admin.cpp`**：`require_admin()` 守卫、`load_system_counts()`/`load_users()` 两条聚合 SQL（全在 SQL 内、无 N+1）、`build_overview()`（**先取快照后取租约**，§6.3.3 实现约束 2 落地）、`to_json()`（camelCase 契约）。三个入口都做成"依赖外部递进来"（`AuthUser` / `StatusProvider` / `db::Session&`），接线时不必改本文件
   - **单测** `tests/admin_test.cpp` **15 条全绿**（守卫顺序、JSON 字段契约、锁顺序、失败路径不变式 9 条纯逻辑 + 真库聚合 6 条；探针数据带 `ojadm` 前缀并在 `TearDown` 级联删净）。`-DOJ_SANITIZE=address,undefined` 下同样全绿
-  - **本条仍不勾选**，三处待接线：① 路由与统一包络（T3.5，`common/response.h` 未开工；`errors.h` 已由 T3.3 补上）；② Cookie → 登录用户（T3.3 已提供 `web::authenticate()`，`AuthUser` 由会话层递进来）；③ 运行态三项的真实来源（T2.7 调度器；当前 `unwired_status_provider()` **如实**返回 `judgeAlive=false`，不拿 DB 的 pending 行数冒充 `queueLength`）
+  - **本条仍不勾选**，两处待接线：① 路由接线 —— 统一包络与 Cookie → 登录用户（T3.3 的 `web::authenticate()`，`AuthUser` 由会话层递进来）**均已就绪**（T0.5 已用在认证组四端点上），但 `GET /api/admin/overview` 还没挂进 `register_routes()`；② 运行态三项的真实来源（T2.7 调度器；当前 `unwired_status_provider()` **如实**返回 `judgeAlive=false`，不拿 DB 的 pending 行数冒充 `queueLength`）
   - **两处口径是本轮定的、文档没写死的**（代码里各只需改一行，注释已标注）：`judgingCount` 取 `status IN ('pending','judging')`（只数 `judging` 会让 judge 未接线时排队中的提交在页面上彻底不可见）；`users[].solved` 与 `attempted` **不互斥**（`attempted` = 有过任意提交的题数，与 §6.5 的 `byDifficulty`/`byTag` 写法同源；单题粒度仍走 §6.4 的 `CASE`）
 - [ ] T3.13 改密码端点（§6.3.5）`[D-40]`
   - `POST /api/auth/password`：bcrypt `compare` 验旧密码 → 事务内 `UPDATE password_hash` + `DELETE FROM sessions WHERE user_id=? AND token<>?`
@@ -2643,6 +2682,8 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
   - `user_id` 三处出现（三条 SQL），全部用预处理语句占位符传参
   - **不新增任何表或列**（§3.5）
 - [ ] **验收**：`curl` 走通注册→登录→列表→提交→轮询→历史全链路；另用 admin 账号 `curl /api/admin/overview` 返回 200、普通账号返回 1003
+  - **前三步已通**（T0.5 一轮实测：注册 201 → 重复 1005 → 登录 200 + `Set-Cookie` → 带 Cookie `auth/me` 200 → 登出后 1002）。**「列表」之后全卡在 judge 与提交端点**（T2.7 / T3.7 未开工）；admin 端点同样待路由接线（T3.12 三处待接线已从三处减为两处）
+  - **登录链路的【单测层面】现已全覆盖**：`bcrypt_test` 11 + `auth_api_test` 20 + `session_test` 26 + `response_test` 17 + `routes_test` 12 = **86 条**，全量 `ctest` **406/406 通过**、0 跳过（唯一 Skipped 是 `LoaderTest.DatabaseFailureRollsBack…`，MySQL 账号缺 `SUPER` 建不了触发器，早于本轮）
 - [ ] **验收**：改密链路 `curl` 走通 —— 登录拿 cookie A → 登录第二个终端拿 cookie B → 用 A 改密 → B 调 `auth/me` 返回 1002、A 仍返回 200、旧密码登录失败
 - [ ] T3.15 diff / 删除 / 重跑三个端点 `[D-42] [D-49] [D-58]`
   - `GET /api/submissions/diff?from=&to=`：归属校验写进 `WHERE id=? AND user_id=?`（不单独查再比）；`from==to` → 1001；返回两段原文 + `hunks`，**diff 算法在前端**（服务端只传原文，见 §6.3.6）
@@ -2680,7 +2721,33 @@ v1.4 一次性加了 20 项需求，风险 R-10 是真实的。**降级顺序按
 ### M4 — 前端（Day 14–17）
 
 - [ ] T4.1 骨架：`app.css` 设计系统（色板/间距/按钮/表格/徽标）+ 顶栏 + 通用 `api.js` `common.js`
-- [ ] T4.2 `login.html`：登录/注册切换、表单校验、redirect 跳转
+  - **已完成 `static/css/app.css`**：CSS 变量色板 + 4px 基准间距 + 按钮/表单/卡片/表格/徽标/toast + `pre.ascii-art`（`[D-48]` 的横向滚动不换行）。**为什么必须用变量而不是字面量**：同一批颜色要在五页出现几十次，字面量分散后"换 accent"要全文替换，漏掉的那一处会静默留下不协调的色块 —— 不崩、不可测、只能靠肉眼发现
+    - **输入框的校验失败态用「左边框 + 淡底」而非整块红底**：整块红底会让用户以为服务端拒绝了请求，而登录页的绝大多数红框只是"格式不对，还没发出去"
+  - **已完成 `static/js/api.js`**（请求层）
+    - **一个请求只有两种结局**：`resolve({code, message, data})`（**包络内的失败一律 resolve**）/ `reject(ApiError)`（没拿到包络：网络断、静态 404 的 HTML、连接被拒）
+    - **为什么不「code !== 0 就 throw」**：未登录（1002）不是异常 —— 顶栏要**渲染未登录形态并继续跑**（`[D-52]`），轮询遇到 1002 要跳登录页并把草稿带过去（`[D-44]`）。两者都不是"调用栈里没人能处理"的错误；让它们 throw 就得 everywhere 加 try/catch，漏一处就变成"未登录时白屏"
+    - **先判 JSON 再判状态**：静态文件 404 返回的是 HTML，直接 `response.json()` 会抛 SyntaxError，被误报成"服务器内部错误"，用户会去刷新而不是检查地址
+    - **`credentials: 'same-origin'` 显式写出**：默认值本来就是它，但写出来是为了让"登录态为什么能生效（HttpOnly Cookie，JS 读不到）"在代码里可见 —— 将来若有人为调跨域 API 改成 `'include'`，这一行就是他会先看到的地方
+    - **`currentUser()` 模块级缓存**：顶栏、概览条、admin 入口判定读的是同一份登录态，各自 fetch 会在 Network 面板出现多条一模一样的 `/api/auth/me`，AC-24/AC-35 的验收反而要花时间解释"为什么重复"
+  - **已完成 `static/js/common.js`**（`renderTopbar()` + `escapeHtml()` + `toast()` + `redirectToLogin()` + `formatLocalTime()`）
+    - **顶栏是同一个组件按登录态条件渲染，不是三套模板**（§7.1 的三张线框看着像三份模板，但只在两处不同）。写成多套模板，AC-23「普通用户两者都不可见，**DOM 中不存在该元素**，不是 CSS 隐藏」就得靠"记得给另一套也删掉"来保证，而那个"记得"迟早会漏；条件渲染里"不渲染"是 default 分支的**默认结果**
+    - **`[D-41]`：普通用户不渲染任何角色徽标**（不显示"普通用户"字样）—— 那是一条对每个用户都无信息量的标签
+    - **`login.html` 不调用本组件**（§7.1 明确：登录页不渲染顶栏，否则同页出现「登录」和「登出」两个按钮，AC-35 专门验证这一点）—— 故本组件做成"由页面主动调用"而非自动挂载
+  - **本条【不勾选】**：题目页的编辑器/左右分栏（T4.4/T4.5）与五页其余四页的顶栏接线属 T4.3~T4.14
+- [√] T4.2 `login.html`：登录/注册切换、表单校验、redirect 跳转
+  - **已完成 `static/login.html` + `static/js/auth.js`**（ES Module，无构建步骤，§7.1）
+  - **本地校验与服务端逐条对齐**：用户名 3–32 且字符集 `[A-Za-z0-9_-]`、注册时密码 6–64（`auth.js` 里逐条注明对应 `auth_api.h` 的哪个常量）。两边各写一份必然漂移，而漂移的症状很隐蔽：前端放行一个 40 字符用户名，服务端回 1001，用户看到的是"表单自己清空了"却不知道为什么
+    - **登录时【不】校验密码长度**：改密码功能（T4.17）尚未上线，历史账号的密码可能只有 5 位，前端先拦一道会让正确口令也登不进去，且错误文案（"长度不足"）指向错误方向。注册才查 —— 服务端注册时一定会查（§6.3 四道闸门之三）
+  - **本地校验不通过就不发请求**（与 T4.17 改密表单同一条约定）。代价是服务端那条分支在浏览器里不触发，但它本来就该由 §9 的 curl 验收与单测覆盖，前端重复跑一遍只会更慢
+  - **`redirect` 参数做了站内校验**（`[D-44]` T4.27 / T4.28）：只接受**站内绝对路径**，且拒绝 `//evil.com`（协议相对）与 `/\evil.com` —— **只查"以 / 开头"是不够的**，这是最常见的一处"看起来校验过了"；另外拒绝跳回 `/login.html` 自身（未登录拦截跳登录、登录后再跳回登录 = 死循环）。校验不过退回 `/list.html` 而不是报错：手敲坏参数不该被拦住
+  - **注册成功后自动走一次 login**：单实例下注册者就是本人，再输一遍密码是纯摩擦。但**不能在注册响应里种 Cookie** —— §6.3 的注册端点不签发会话（只有 `201 {userId, username, role}`，无 `Set-Cookie`，实测确认），故这里显式再调 login。代价是多一次 bcrypt（约 100ms，§6.2.1 要点 3）
+  - **`[D-46]` 不预填上次用户名**：只给 `<input autocomplete="username">`（让浏览器记住**值**），不写 `value`；且**已登录用户访问本页会被直接送走**，省得在"登录"表单上点一下才被弹回
+  - **三个页面级提示各有明确出处，不是"通用错误区"**：`?deleted=1`（注销完成，`[D-57]` T4.29）/ `?expired=1`（会话过期，`[D-44]` T4.27）/ **注册被关闭不在这里判断** —— §7.1 明确"不加探测注册是否开放的端点"，而是等用户真提交后由 1010 触发，那才是准确的信息
+  - **1005 与 1010 走整体提示而非字段红字**：这两个码下用户名本身合法，挂到输入框下会让人以为是格式问题，改用户名或等管理员开注册才对；而 1001 才按 `data.field` 挂到对应输入框下（§6.3）
+  - **登录前清空密码框再跳转**：不是洁癖 —— 浏览器 bfcache 可能在同页返回时恢复出带密码的表单，那等于把口令留在页面上
+  - **前端逻辑验证**（node 24 + 极简 DOM 桩，无框架无依赖，脚本未入库）：9 条全绿 —— 非法用户名本地拦下且**零请求** / 错误文案挂到 `username` 框 / 注册密码过短本地拦下且零请求 / 登录**不拦**短密码并发出请求 / 注册流程 = `register` 然后 `login` 两次 / 合法站内 `redirect` 生效 / `//evil.com` 被拒回 `/list.html` / 绝对外站 URL 被拒 / 跳回 `/login.html` 被拒
+  - **对着真服务跑的 11 条集成验证全绿**（node 复用真实的 `static/js/api.js`，Cookie 由桩手工带上 —— 这正是浏览器替我们做的事）：未登录 `auth/me` → 1002 且 **resolve 而非 throw** / 注册 → 0 且拿到 `userId` / 注册拿到 `role='user'`（**不因注册提权**）/ 注册后 `auth/me` 仍 1002（注册端点确实不签发会话）/ 错密码 → 1001 `field=password` / 登录 → 0 且 `Set-Cookie` 的 sid 是 64 位小写 hex / 带 Cookie `auth/me` → 0 且用户名一致 / 登出 → 0 / **登出后 `auth/me` → 1002（AC-1）** / 未知端点与静态 404 都 resolve 成 1004 包络 / 连不上服务 reject `ApiError`
+  - **已知欠账（属 T4.3，不是本条缺陷）**：登录成功跳 `/list.html`，而 `list.html` 仍是 0 字节 → 浏览器看到 1004 包络。§9 的 T4.2 只要求"redirect 跳转"，跳转本身已通
 - [ ] T4.3 `list.html` **（兼首页）**：概览条 + 筛选栏 + 表格 + 分页 + 空态 `[D-38]`
   - 顶部概览条见 T4.15；筛选栏与表格分页逻辑同 v1.2
   - 概览条与表格是**两个独立的数据流**：翻页/筛选只重发 `GET /api/problems`，**不重取 `overview`**（避免翻页时概览条闪烁）

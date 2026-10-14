@@ -8,8 +8,20 @@
 //   ✅ 4. 幂等建表               —— 执行 db/init/01-schema.sql 并核对 11 张表（T0.3）
 //   ✅ 5. 题库同步               —— 读 problems/*.json → 校验 → 入库 → 灌只读缓存（T1.2）
 //   ✅ 6. 工作区扫残             —— 清 /tmp/oj-judge/* 残留，必须排在 judge 之前（T2.9）
-//   ⏳ 7. 角色同步（T3.11）→ 8. judge 调度器（T2.7）→ 9. listen（T0.5）
-//   后三步都还没接线，因此本次进程在同步完题库、回显完配置后即退出。
+//   ✅ 7. 过期会话回收           —— 启动时一次（§6.3.2 / T3.10）
+//   ✅ 8. HTTP 起服务并 listen   —— 静态挂载 + 认证四端点（T0.5 / T3.5 认证组）
+//   ⏳ 9. 角色同步（T3.11）→ 10. judge 调度器（T2.7）
+//   后两步还没接线：判题尚未开工，登录/注册这条链路已可端到端跑通。
+//   ⚠️ 第 8 步把本进程变成【常驻阻塞】——在此之前 `make run` 跑完就退出，
+//      那正是 §9 T0.5 验收里"浏览器访问 localhost:8080 看到页面"的前提。
+//
+// 【信号处理：为什么只接 SIGINT/SIGTERM 两个】
+//   listen() 阻塞在 accept 上，靠信号打断才是干净的退出路径。
+//   stop_server() 只做一件事：让 httplib 从 accept 返回。**它不做资源回收** ——
+//   DB 连接池与日志的关闭仍在 main 的正常流程里（listen 返回后顺序执行），
+//   于是"收到信号"与"进程退出"之间仍然只有一条收尾路径。
+//   SIGHUP 不接：SPEC 全篇只有「改配置 + 重启」这一条运维模式（§6.3.1），
+//   给 SIGHUP 挂一个"重新读 .env"的语义等于开第二条（且未被文档定义的）路径。
 //
 // 【为什么每一步失败都直接退出，而不是打个 WARNING 继续】
 //   后面每一步都以前一步为地基：没有连接池，建表无处执行；没有表，题库同步无处落库；
@@ -29,6 +41,7 @@
 //     · 某道题校验不通过 = 题库自己的问题，决策明确要求"跳过该题、其余照常"，
 //       因此只打 ERROR + WARN，不阻止服务起来（50 道题里 1 道写错不该让服务起不来）。
 // =============================================================================
+#include <csignal>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -40,6 +53,8 @@
 #include "db/mysql_pool.h"
 #include "judge/workspace.h"
 #include "problem/loader.h"
+#include "web/routes.h"
+#include "web/session.h"
 
 namespace {
 
@@ -176,6 +191,13 @@ bool apply_schema(std::string* error) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 本进程自 T0.5 起转为常驻（listen 阻塞），而启动回显是【启动期诊断的唯一出口】
+  // —— 配置错误、端口被占、题库同步失败都在退出前打到 stdout。
+  // stdout 默认在【非 TTY】（重定向到文件、nohup、systemd）时是全缓冲：
+  // 于是 `make run` 看得到回显，而 `./build/oj > log 2>&1 &` 的日志文件在
+  // 出错那一刻是空的 —— 恰恰是最需要它的时刻。一行改成行缓冲即可。
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
   // 允许 `./oj /path/to/.env` 覆盖默认路径，便于临时验证另一份配置
   const std::string env_path = (argc > 1) ? argv[1] : ".env";
 
@@ -269,6 +291,31 @@ int main(int argc, char** argv) {
   }
   if (!sweep.notes.empty()) std::printf("[oj] %s\n", sweep.notes.c_str());
 
+  // ---- 7. 过期会话回收（T3.10 / §6.3.2）----
+  // §6.3.2 要求「启动时一次 + 每次登录时一次」。登录那一次已并入
+  // session::issue 的同一事务（无需另调），这里的调用补上"启动时一次"，
+  // 它管的是「服务停了三天再起来」这一段 —— 那些行没人会去登录，也就没人会触发回收。
+  //
+  // 【失败只记 WARN，不拒绝启动】：回收失败不影响任何在线功能（查会话的 SQL
+  // 自己带 `expires_at > UTC_TIMESTAMP()`，过期会话本来就查不出来），
+  // 而"起不来"比"多留几行过期会话"严重得多。
+  long purged_sessions = 0;
+  {
+    oj::db::Lease lease = oj::db::Pool::instance().acquire();
+    std::string purge_error;
+    if (!lease.valid()) {
+      oj::common::log_warn(oj::common::LogChannel::kApp,
+                           "过期会话回收未执行：连接池取不到租约（见上一条 ERROR）");
+    } else if (!oj::web::purge_expired(lease.session(), &purged_sessions, &purge_error)) {
+      oj::common::log_warn(oj::common::LogChannel::kApp,
+                           "过期会话回收失败（不影响启动，过期会话本就查不出来）：" + purge_error);
+    } else if (purged_sessions > 0) {
+      oj::common::log_info(oj::common::LogChannel::kApp,
+                           "已回收过期会话 " + std::to_string(purged_sessions) +
+                               " 条（§6.3.2，expires_at < UTC_TIMESTAMP()）");
+    }
+  }
+
   // ---- 启动回显 ----
   const std::string config_echo = oj::common::dump_config();
   std::printf("\n%s\n", config_echo.c_str());
@@ -277,9 +324,20 @@ int main(int argc, char** argv) {
   std::printf("%s\n", load_report.summary().c_str());
   std::printf("[oj] %s（根目录 %s）\n", sweep.summary().c_str(),
               oj::judge::workspace_root().c_str());
-  std::printf("[oj] 判题缓存已就绪：%zu 题。角色同步 / judge / HTTP 均待接线"
-              "（T3.11 / T2.7 / T0.5），本次进程即将退出。\n",
-              oj::problem::cache_size());
+  std::printf("[oj] 判题缓存已就绪：%zu 题；已回收过期会话 %ld 条\n",
+              oj::problem::cache_size(), purged_sessions);
+  // ⚠️ 角色同步（T3.11）尚未接线，因此【此刻 role 就是库里的既有值】：
+  //   改 .env 的 OJ_ADMIN_USERNAMES 并重启【不会】生效，要等 T3.11 落地。
+  //   这句话是刻意打出来的 —— 运维改完 .env 发现没生效而查不到任何提示，
+  //   是比"功能没做"更难查的一类问题。
+  const std::string admin_echo =
+      oj::common::config().admin_usernames_configured
+          ? "共 " + std::to_string(oj::common::config().admin_usernames.size()) +
+                " 个（角色同步 T3.11 尚未接线，改 .env 暂不生效）"
+          : "未设置（保持库中既有 role 不变）";
+  std::printf("[oj] 注册开关 OJ_ALLOW_REGISTER=%s；管理员名单%s\n",
+              oj::common::config().allow_register ? "1（开放注册）" : "0（已关闭注册）",
+              admin_echo.c_str());
 
   oj::common::log_text(oj::common::LogChannel::kApp, oj::common::LogLevel::kInfo,
                        config_echo);
@@ -289,9 +347,48 @@ int main(int argc, char** argv) {
                        load_report.summary() + "；判题缓存 " +
                            std::to_string(oj::problem::cache_size()) + " 题");
   oj::common::log_info(oj::common::LogChannel::kApp,
-                       "启动顺序推进到「DB 就绪 + 建表完成 + 题库同步完成 + 工作区扫残完成」，"
-                       "后续步骤待接线");
+                       "启动顺序推进到「DB 就绪 + 建表 + 题库同步 + 工作区扫残 + 会话回收 + HTTP 就绪」");
 
+  // ---- 8. HTTP 起服务并 listen（T0.5 / T3.5 认证组）----
+  // 排在最后：listen() 之前的所有失败都以"拒绝启动"的方式响亮失败，
+  // 而 listen 之后本进程转为常驻，此时再出的问题只能靠 app.log 事后查。
+  //
+  // 【信号处理器里只调用 async-signal-safe 的那一个函数】
+  //   web::stop_server() 内部只有一次 httplib 的 self_pipe 写入（它自己保证
+  //   async-signal-safe），而 std::signal 的平台实现决定了：这里【不能】写日志、
+  //   不能加锁、不能分配内存 —— 曾经的日志调用会在信号与主流程交错时死锁。
+  //   故 stop_server 的实现里没有一行日志，需要的上下文由 listen 返回后的正常
+  //   流程补记。
+  std::signal(SIGINT, [](int) { oj::web::stop_server(); });
+  std::signal(SIGTERM, [](int) { oj::web::stop_server(); });
+
+  oj::web::ServerOptions server_options;
+  server_options.static_dir = oj::common::config().static_dir;
+  server_options.listen_host = oj::common::config().listen_host;
+  server_options.listen_port = oj::common::config().listen_port;
+
+  std::printf("[oj] HTTP 监听 http://%s:%d（静态根 %s，线程池 8）；"
+              "Ctrl-C 停止。登录页 http://127.0.0.1:%d/login.html\n",
+              server_options.listen_host.c_str(), server_options.listen_port,
+              server_options.static_dir.c_str(), server_options.listen_port);
+
+  if (!oj::web::listen_and_serve(server_options)) {
+    oj::common::log_error(oj::common::LogChannel::kApp,
+                          "HTTP 服务未能监听 " + server_options.listen_host + ":" +
+                              std::to_string(server_options.listen_port) +
+                              "（端口被占用是最常见的一种）");
+    std::fprintf(stderr,
+                 "[oj] HTTP 服务未能监听 %s:%d —— 请检查端口是否被占用"
+                 "（OJ_HTTP_PORT 可改端口，见 .env）\n",
+                 server_options.listen_host.c_str(), server_options.listen_port);
+    oj::db::Pool::instance().shutdown();
+    oj::common::shutdown_logging();
+    return 1;
+  }
+
+  // listen 返回 = 收到 SIGINT/SIGTERM（唯一能走到这里的路径，routes.h 已说明）。
+  oj::common::log_info(oj::common::LogChannel::kApp, "收到停止信号，HTTP 已停止接收新请求");
+  std::printf("\n[oj] 已停止。\n");
   oj::db::Pool::instance().shutdown();
   oj::common::shutdown_logging();
   return 0;
