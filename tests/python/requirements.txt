@@ -1,0 +1,3 @@
+# tests/python 下的接口自动化测试只需要这一个第三方包。
+# 安装：pip3 install -r tests/python/requirements.txt
+requests>=2.28
