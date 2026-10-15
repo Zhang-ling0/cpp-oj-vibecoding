@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<!--
+  CppOJ 管理页（占位）—— SPEC §9 M4 T4.14 `[D-37]`
+
+  【为什么是占位页】
+    D-37 把 admin 的能力限定为"看"：`GET /api/admin/overview` 一个只读端点 + 一个只读页面。
+    真正的页面实现（T4.14 完整版）与它的前端脚本 `js/admin.js` 目前都还是 0 字节的占位文件，
+    本项目当前的开发重心是 API 契约（T3/T5），页面排在后面（SPEC §9 明确允许先砍页面）。
+
+    但 0 字节的 .html 会被浏览器渲染成一个完全空白的页面：HTTP 200 + 空 body，
+    看起来像"服务坏了"。这份占位页要解决的就是这个歧义 —— 明确告诉打开它的人：
+    **这里只有一个只读 API，页面还没做**，以及怎么用 curl 直接看。
+
+  【为什么不引 js/admin.js】
+    它是 0 字节（引了等于引了个空文件）。同理 api.js 里目前没有 admin 相关方法，
+    所以本页【自包含】：一个按钮 + 一段内联 fetch，用完即弃，等真正的 admin.js 落地时整体替换。
+
+  【role 的真源不在本页】
+    管理员身份由 `.env` 的 `OJ_ADMIN_USERNAMES` 声明式指定（SPEC §6.3.1 `[D-37]`），
+    本页不做任何提权操作。顺带说明：启动角色同步（T3.11）尚未接线，所以当前改 .env 不会生效。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>管理 · CppOJ</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <main class="auth">
+    <div class="card auth__card">
+      <h1 class="auth__title">管理面板</h1>
+      <p class="auth__subtitle">
+        管理能力当前是<strong>严格只读</strong>的，且只有一个 API 端点。页面尚未实现（T4.14）。
+      </p>
+
+      <p class="auth__subtitle">
+        <code>GET /api/admin/overview</code> —— 需要 <code>role = "admin"</code>；
+        未登录回 <code>1002</code>，非管理员回 <code>1003</code>。
+        管理员身份只能通过改 <code>.env</code> 的 <code>OJ_ADMIN_USERNAMES</code> 再重启获得，
+        页面与 API 都不提供提权入口（SPEC §6.3.1）。
+      </p>
+
+      <button class="btn" id="fetch-btn" type="button">以当前登录身份拉取</button>
+      <pre id="out" style="margin-top:16px;white-space:pre-wrap;word-break:break-all"></pre>
+
+      <p class="auth__subtitle" style="margin-top:16px">或者直接用 curl：</p>
+      <pre style="white-space:pre-wrap">curl -c /tmp/oj.jar -X POST http://127.0.0.1:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}'
+curl -b /tmp/oj.jar http://127.0.0.1:8080/api/admin/overview</pre>
+    </div>
+  </main>
+
+  <script>
+    // 只做一件事：把端点的原始响应打出来。用完即弃的占位逻辑。
+    document.getElementById('fetch-btn').addEventListener('click', function () {
+      var out = document.getElementById('out');
+      out.textContent = '请求中…';
+      // credentials: 'same-origin' —— 前后端同源部署（CORS 未开启，见 API.md §8.1），
+      // 不带它浏览器不会带上 sid Cookie，于是只会拿到 1002。
+      fetch('/api/admin/overview', { credentials: 'same-origin' })
+        .then(function (res) { return res.json().then(function (body) { return [res.status, body]; }); })
+        .then(function (pair) {
+          out.textContent = 'HTTP ' + pair[0] + '\n' + JSON.stringify(pair[1], null, 2);
+        })
+        .catch(function (e) { out.textContent = '请求失败：' + e; });
+    });
+  </script>
+</body>
+</html>

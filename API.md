@@ -988,7 +988,8 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 
 | 路径 | 内容 |
 |---|---|
-| `/login.html` `/list.html` `/problem.html` `/history.html` `/admin.html` | 五页前端 `[D-36] [D-37]` |
+| `/login.html` `/list.html` `/problem.html` `/history.html` | 前端页面 `[D-36]` |
+| `/admin.html` | **占位页**：管理能力只有只读 API，T4.14 的完整页面与 `js/admin.js` 未做。占位页说明这一点并给出 curl 命令（0 字节的 .html 会渲染成空白页，看起来像服务坏了） |
 | `/js/*.js` | 请求层与页面逻辑（`api.js` `auth.js` `list.js` `problem.js` `history.js` `poll.js` `overview.js` `diff.js` `admin.js` …） |
 | `/css/*.css` `/vendor/**` | 样式与 vendored 的 marked / DOMPurify / CodeMirror（`D-73`，无运行时外网依赖） |
 
@@ -1051,6 +1052,7 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 | 5 | 限流 | `1006` / `1007` | `ratelimit.h` 空文件 | 提交组接线时必须补，否则配额形同虚设 |
 | 6 | 方法不被接受 | 405 | 404（httplib 0.60 不产生 405） | 码仍是 `1004`，前端无感；`routes.cpp` 的 `case 405` 不可达 |
 | 7 | 提交 / 重跑 | 201 + `submissionId` | 校验通过后回 `1009 / 503` 且不落库 | judge 调度器（T2.7）未接线；接上 `judge_available()` 即可 |
+| 8 | 校验失败的题 | 列表页过滤掉 | **仍出现在列表页**（`caseCount=0`、详情无用例） | 实测钉死（`tests/run_problemsync_test.sh` §3）：列表端点直接查 `problems` 且无失效过滤。要过滤需加失效标记列 |
 
 ---
 
@@ -1168,6 +1170,7 @@ curl -s $BASE/nonexistent.html                               # 1004 / 404（静�
 | 改密/注销/收藏/统计/概览 | `src/web/user_api.cpp` / `include/web/user_api.h` |
 | 提交组（新建/列表/详情/diff/删除/重跑 + `judge_available()`） | `src/web/submission_api.cpp` / `include/web/submission_api.h` |
 | curl 端到端验收 | `tests/run_tests.sh`（单测：`tests/run_unit_tests.sh`） |
+| 题库增/改/写坏/删 + 重启链路 | `tests/run_problemsync_test.sh`（自拉独立实例，不碰正在跑的服务） |
 | 只读管理端点 | `src/web/admin.cpp` / `include/web/admin.h` |
 | 前端请求层 | `static/js/api.js`、`static/js/auth.js` |
 | 运行期配置（`.env` 键） | `include/common/config.h`、`.env` |
