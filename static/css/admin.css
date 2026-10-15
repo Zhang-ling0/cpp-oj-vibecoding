@@ -1,0 +1,106 @@
+/* =============================================================================
+   运维概览页 —— SPEC §9 M4 T4.14 [D-37]
+   规格来源：§7.1「系统运行状态卡片 + 用户清单表」/ API.md §7.1 GET /api/admin/overview
+
+   【本文件只写"页面专属"的东西】
+     §6.1 的分工是 app.css 管跨页复用的元素（按钮/表单/表格/徽标/徽章/统计块），
+     页面 css 管页面结构。本页刻意复用了 app.css 的 `.page` `.card` `.table`
+     `.stat` `.badge` `.verdict` `.notice` `.cell-center`，
+     所以这里只剩三类东西是"只有运维页才有"的：
+       ① 区块骨架（标题 + 说明行的 block）
+       ② 运行态那一行（pill 与等宽数值）
+       ③ 用户表的列宽与数字右对齐
+     重复定义 .btn / .table 会让"换主色"要改三个文件 —— 那正是变量化的意义所在。
+   ============================================================================= */
+
+/* ---- 页头：标题 + 刷新按钮 ---------------------------------------------------- */
+.page__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+.page__head h1 { font-size: 20px; }
+.page__head p { margin: 2px 0 0; font-size: 13px; }
+
+/* ---- 区块：卡片 + 标题 + 底部说明 --------------------------------------------- */
+.block { padding: var(--sp-5); }
+.block__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+  font-size: 15px;
+}
+.block__title .muted { font-size: 12px; font-weight: 400; }
+/* 底部说明行：把"为什么没有写操作"这类约束写在界面上，而不是留给读文档 */
+.block__note {
+  margin: var(--sp-4) 0 0;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--c-border);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--c-text-muted);
+}
+.block__note b { color: var(--c-text); }
+.block__note .mono { color: var(--c-accent); }
+
+/* ---- 系统状态：计数栅格 -------------------------------------------------------- */
+.sysstats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-4);
+}
+/* .stat 本身来自 app.css（首页概览条同款），这里只补第三行说明 */
+.stat__hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #7c8aa0;
+}
+
+/* ---- 运行态一行：队列 / 并发 / 判题存活 --------------------------------------- */
+.runtime {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-4);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--c-border);
+}
+.runtime__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  background: var(--c-surface-2);
+}
+.runtime__label { font-size: 12px; color: var(--c-text-muted); }
+.runtime__value { font-size: 15px; font-weight: 600; }
+
+/* pill：状态词而非数字。0 与"不可用"必须长得不一样 —— 见 admin.js 文件头 */
+.pill {
+  padding: 2px var(--sp-3);
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+.pill--ok { background: var(--c-ok-soft); border-color: rgba(21, 128, 61, .28); color: var(--c-ok); }
+.pill--warn { background: var(--c-warn-soft); border-color: rgba(180, 83, 9, .28); color: var(--c-warn); }
+
+/* ---- 用户清单 ---------------------------------------------------------------- */
+.admin-users { font-size: 13px; }
+/* 数字列右对齐：竖着扫一列才能比较大小，左对齐时"位数"成了干扰项 */
+.admin-users th.num, .admin-users td.num { text-align: right; }
+/* 姓名列不换行：长用户名会把表撑宽，把其余列挤成两行 */
+.admin-users td:first-child { white-space: nowrap; }
+.admin-users td:last-child { white-space: nowrap; }
+
+@media (max-width: 900px) {
+  .sysstats { grid-template-columns: repeat(2, 1fr); }
+  .runtime { grid-template-columns: 1fr; }
+}

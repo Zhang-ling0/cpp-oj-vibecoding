@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<!--
+  题库列表（兼首页）—— SPEC §9 M4 T4.3 [D-38] / T4.15
+  规格来源：§7.1「顶部个人概览条 + 筛选栏 + 题目表格 + 分页」
+            §7.3 关键交互（翻页只重发 problems、不重取 overview）
+            §7.4 空态（无结果 → 清除筛选；未登录 → 概览条改引导）
+            §6.3 GET /api/problems / GET /api/tags
+
+  【概览条与表格是两个独立的数据流】
+    概览条由 overview.js 渲染，页面挂载时请求一次；
+    筛选与翻页只重发 GET /api/problems。翻页时概览条不闪烁是它的前提。
+
+  【本页【挂顶栏】且 active=题库】
+    与 login.html 相反：登录成功后 redirect 默认就是 /list.html，
+    这一页必须能看到「我的 / 登出」，否则用户不知道自己已登录。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>题库 · CppOJ</title>
+  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
+</head>
+<body>
+  <!-- 顶栏由 common.js 的 renderTopbar() 按登录态条件渲染（[D-52]） -->
+  <header id="topbar"></header>
+
+  <main class="page">
+    <!-- 概览条 [D-38]：未登录时改成「登录后查看…」而不是隐藏（§7.4） -->
+    <section id="overview" class="overview"></section>
+
+    <!-- 筛选栏。表单用 <form> 但不靠 submit：筛选是"改一个条件就重查"，
+         按回车提交反而会让用户以为漏掉了某个条件没生效。 -->
+    <section class="card filters">
+      <div class="filters__row">
+        <div class="filters__field filters__field--grow">
+          <label class="filters__label" for="f-keyword">搜索</label>
+          <input class="field__input" id="f-keyword" type="search"
+                 placeholder="题名或标识，如 两数之和 / two-sum" autocomplete="off">
+        </div>
+
+        <div class="filters__field">
+          <span class="filters__label" id="diff-label">难度</span>
+          <div class="seg" role="group" aria-labelledby="diff-label">
+            <button type="button" class="seg__btn is-on" data-difficulty="" aria-pressed="true">全部</button>
+            <button type="button" class="seg__btn" data-difficulty="easy" aria-pressed="false">简单</button>
+            <button type="button" class="seg__btn" data-difficulty="medium" aria-pressed="false">中等</button>
+            <button type="button" class="seg__btn" data-difficulty="hard" aria-pressed="false">困难</button>
+          </div>
+        </div>
+
+        <div class="filters__field">
+          <label class="filters__label" for="f-progress">我的进度</label>
+          <select class="field__input" id="f-progress">
+            <option value="">全部</option>
+            <option value="none">未开始</option>
+            <option value="attempted">尝试过</option>
+            <option value="solved">已通过</option>
+          </select>
+        </div>
+
+        <div class="filters__field">
+          <label class="filters__label" for="f-sort">排序</label>
+          <select class="field__input" id="f-sort">
+            <option value="">默认</option>
+            <option value="featured">精选优先</option>
+            <option value="easiest">由易到难</option>
+            <option value="hardest">由难到易</option>
+          </select>
+        </div>
+
+        <div class="filters__field">
+          <span class="filters__label">&nbsp;</span>
+          <label class="check">
+            <input type="checkbox" id="f-favorite">
+            <span>仅看收藏</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="filters__row filters__row--tags">
+        <span class="filters__label">标签</span>
+        <div id="f-tags" class="tags"></div>
+      </div>
+
+      <p class="filters__hint muted" id="personal-hint" hidden>
+        「我的进度」与「仅看收藏」需要登录后使用 —— 未登录访问首页也能浏览全部题面。
+      </p>
+    </section>
+
+    <div class="list-head">
+      <span id="result-hint" class="muted"></span>
+      <button type="button" class="btn btn--ghost btn--sm" id="clear-filters">清除筛选</button>
+    </div>
+
+    <div class="card table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>题目</th>
+            <th>难度</th>
+            <th>标签</th>
+            <th>用例</th>
+            <th>限制</th>
+            <th>我的进度</th>
+            <th>收藏</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+
+    <nav id="pager" class="pager" aria-label="分页"></nav>
+  </main>
+
+  <script type="module">
+    import { initListPage } from '/js/list.js?v=20261015-5';
+    initListPage(document);
+  </script>
+</body>
+</html>

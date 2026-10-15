@@ -26,7 +26,7 @@
 //   代价是多一次 bcrypt（约 100ms，§6.2.1 要点 3），换来的是少一次交互。
 // =============================================================================
 
-import { post } from './api.js';
+import { post } from './api.js?v=20261015-5';
 
 // 与 include/web/auth_api.h 的常量逐条对应（改那边必须改这里）
 const USERNAME_MIN = 3;
@@ -90,6 +90,8 @@ export function initLoginPage(root) {
     tabs: root.querySelectorAll('[data-mode]'),
     username: root.querySelector('#username'),
     password: root.querySelector('#password'),
+    title: root.querySelector('#auth-title'),
+    subtitle: root.querySelector('#auth-subtitle'),
     usernameError: root.querySelector('#username-error'),
     passwordError: root.querySelector('#password-error'),
     passwordHint: root.querySelector('#password-hint'),
@@ -131,6 +133,15 @@ export function initLoginPage(root) {
       tab.setAttribute('aria-selected', active ? 'true' : 'false');
     }
     el.submit.textContent = mode === 'login' ? '登录' : '注册并登录';
+    // 标题与副标题跟着模式走：两个 tab 共用同一块区域，若标题固定不变，
+    // 点了「注册」之后页面看起来毫无变化 —— 用户会以为按钮没生效。
+    el.title.textContent = mode === 'login' ? '欢迎回来' : '创建账号';
+    el.subtitle.textContent = mode === 'login'
+      ? '登录后即可提交代码、查看提交历史与刷题进度'
+      : '注册后立即登录，账号仅用于本机保存草稿与提交记录';
+    // 注册是"设一个新口令"，登录是"填已有口令"：告诉浏览器哪一种，
+    // 它才不会在注册表单上弹出"用已有密码"的建议。
+    el.password.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
     // 注册才需要长度提示（登录不校验密码长度，理由见 validate 的注释）
     el.passwordHint.textContent = mode === 'register'
       ? `密码 ${PASSWORD_MIN}–${PASSWORD_MAX} 位`

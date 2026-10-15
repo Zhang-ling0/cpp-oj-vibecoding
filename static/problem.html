@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<!--
+  题目详情页 —— SPEC §9 T4.4~T4.8 / T4.11 / T4.20 / T4.22 / T4.28
+  规格来源：§7.2 左右分栏线框 + 结果面板的三种形态
+            §7.3 草稿/提交/轮询/Markdown 渲染/字符画/行高亮
+            [D-26] 分栏可拖拽、[D-47] 提示、[D-48] 禁图片、[D-63] 内存口径、[D-64] 归属分流
+
+  【Ace 的加载顺序有依赖】[D-73 同一条规则]
+    ace.js 必须在 mode/theme/ext 之前；ext-language_tools 依赖 ace 核心已注册。
+    且【全部 defer】——否则它们会在我们的模块脚本之前跑，而 ace 的 config
+    必须在 ace.edit() 之前就位。
+
+  【marked / DOMPurify 是 UMD，走 window；自己的模块走 import】
+    无构建步骤（§7.1），不为了 ESM 特意去 npm 重新打包。
+
+  【结果面板默认隐藏】
+    它在【拿到终态之前是空的】：一块永远显示"暂无数据"的空面板比不显示更糟。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>题目 · CppOJ</title>
+  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
+  <link rel="stylesheet" href="/css/problem.css?v=20261015-5">
+</head>
+<body class="page-problem">
+
+  <!-- 顶栏用同一组件的 compact 变体（[D-52]，不是第二份实现） -->
+  <header id="topbar"></header>
+
+  <div id="workbench" class="workbench">
+    <!-- 左栏：题面 / 提示 / 最近提交 + 下一题建议 -->
+    <section class="pane pane-left">
+      <div class="pane__head">
+        <a id="back" class="btn btn--ghost btn--sm" href="/list.html">← 题库</a>
+        <h1 id="p-title">载入中…</h1>
+        <span id="p-difficulty" class="diff"></span>
+        <button type="button" id="favorite" class="star" aria-pressed="false" aria-label="收藏">☆</button>
+      </div>
+      <div class="pane__meta">
+        <span id="p-tags" class="cell-tags"></span>
+        <span id="p-limits" class="muted"></span>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" id="tab-statement" class="tabs__btn is-on" role="tab" aria-selected="true">题面</button>
+        <button type="button" id="tab-hint" class="tabs__btn" role="tab" aria-selected="false" hidden>提示</button>
+        <button type="button" id="tab-recent" class="tabs__btn" role="tab" aria-selected="false">我的提交</button>
+      </div>
+
+      <div id="pane-statement" class="tabs__pane markdown" role="tabpanel">
+        <div id="p-markdown"></div>
+      </div>
+      <!-- [D-47]：hint_md 为空时本 tab 整个不渲染（JS 侧控制 hidden），
+           与 statement_md 走【同一条】marked + DOMPurify 管线 -->
+      <div id="pane-hint" class="tabs__pane markdown" role="tabpanel" hidden>
+        <div id="p-hint"></div>
+      </div>
+      <div id="pane-recent" class="tabs__pane" role="tabpanel" hidden>
+        <div id="p-recent"></div>
+      </div>
+
+      <aside id="p-next" class="nextcard" hidden></aside>
+    </section>
+
+    <!-- 分栏拖拽把手：键盘可达（左右方向键调 2%） -->
+    <div class="splitter" role="separator" aria-orientation="vertical" aria-label="调整题面与编辑器宽度" tabindex="0"></div>
+
+    <!-- 右栏：编辑器 -->
+    <section class="pane pane-right">
+      <div class="toolbar">
+        <span class="toolbar__lang">C++17</span>
+        <button type="button" id="reset" class="btn btn--ghost btn--sm">重置为模板</button>
+        <button type="button" id="submit" class="btn">提交</button>
+      </div>
+
+      <div id="editor" class="editor">
+        <textarea class="editor__fallback" spellcheck="false"
+                  placeholder="Ace 未加载时的降级编辑器（功能不受影响，只是没有语法着色）"></textarea>
+      </div>
+      <!-- Ace 加载失败时必须【看得见】（§9 T0.6 的原则：不能等用户自己发现没有高亮） -->
+      <div id="editor-warn" class="notice notice--warn editor-warn" hidden>
+        Ace 编辑器未加载，已降级为纯文本编辑器：提交、草稿、Ctrl/⌘+Enter 均正常，仅缺语法着色与括号匹配。
+      </div>
+
+      <div id="status" class="status" data-state="idle">Ctrl/⌘ + Enter 提交</div>
+
+      <!-- 未登录点提交：内联登录框，【不跳转】（跳转会丢正在写的代码）[D-43] -->
+      <div id="inline-login" class="inline-login" hidden>
+        <p>登录后即可提交代码（草稿不会丢失）</p>
+        <div class="inline-login__row">
+          <input class="field__input" id="inline-username" type="text" placeholder="用户名" autocomplete="username">
+          <input class="field__input" id="inline-password" type="password" placeholder="密码" autocomplete="current-password">
+          <button type="button" class="btn" id="inline-go">登录</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 结果面板：占下半屏全宽（逐用例表需要横向空间，§7.2） -->
+  <section id="result" class="result" hidden></section>
+
+  <script defer src="/vendor/marked.min.js?v=20261015-5"></script>
+  <script defer src="/vendor/purify.min.js?v=20261015-5"></script>
+  <script defer src="/vendor/ace/ace.js?v=20261015-5"></script>
+  <script defer src="/vendor/ace/mode-c_cpp.js?v=20261015-5"></script>
+  <script defer src="/vendor/ace/theme-tomorrow.js?v=20261015-5"></script>
+  <script defer src="/vendor/ace/ext-language_tools.js?v=20261015-5"></script>
+  <!-- 【没有 worker-*.js】cdnjs 的 ace 包不含语法检查 worker，且本项目把编译诊断的
+       真源定在服务端 g++ 输出（§5.6），故 editor.js 里 useWorker:false。
+       高亮、折叠、括号匹配、行高亮均不依赖 worker，功能完整。 -->
+
+  <script type="module">
+    import { initProblemPage, bindInlineLogin } from '/js/problem.js?v=20261015-5';
+    initProblemPage(document);
+    bindInlineLogin(document);
+  </script>
+</body>
+</html>

@@ -142,3 +142,15 @@ export async function logout() {
     mePromise = null;
   }
 }
+
+/**
+ * 让登录态缓存失效 —— 登录之后调用。
+ *
+ * 【为什么登录端点里不自动清】
+ *   mePromise 是**模块级**的，而登录请求本身也可能来自本页之外的调用方；
+ *   在 login() 里顺手清缓存，等于让"发一个登录请求"产生一个
+ *   "顺手把别人的缓存也作废"的副作用。这里显式调用，副作用范围可见。
+ */
+export function invalidateCurrentUser() {
+  mePromise = null;
+}

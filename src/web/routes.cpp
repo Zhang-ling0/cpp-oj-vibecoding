@@ -1007,7 +1007,19 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
   // 静态挂载放在【最后】：httplib 优先匹配已注册的路由，
   // 顺序反了也不会被静态文件抢走 /api/*，但显式写在最后能让读代码的人一眼看出
   // "api 是精确匹配的，剩下的路径才是静态"。
-  if (!server.set_mount_point("/", options.static_dir)) {
+  //
+  // 【Cache-Control: no-cache 而不是 max-age=3600】
+  //   no-cache 的含义是"每次都要先向服务器确认"，不是"不许缓存"：
+  //   httplib 的静态处理器会比对 If-Modified-Since，未修改就回 304 空响应，
+  //   所以流量几乎不变，但**改动一定立刻可见**。
+  //   为什么必须有这一行：本项目的前端是原生 ES Module，改一个 .js 就要改所有
+  //   引它的页面；一旦浏览器缓存住旧模块，症状是
+  //   「The requested module './api.js' does not provide an export named 'xxx'」
+  //   或「Unexpected identifier at vendor/xxx.js:1」—— 报错指向的却是**没改过的那个文件**，
+  //   而磁盘上的文件是对的。这类"代码明明是对的却跑不起来"的排查成本极高，
+  //   用一行响应头根除比让人学会清缓存划算得多（§9 M0 的实测教训）。
+  if (!server.set_mount_point("/", options.static_dir,
+                              {{"Cache-Control", "no-cache"}})) {
     std::fprintf(stderr,
                  "[oj] 静态目录不可用：%s（相对当前工作目录，请从项目根目录启动）\n",
                  options.static_dir.c_str());

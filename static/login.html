@@ -8,7 +8,14 @@
 
   【本页【不挂顶栏】——§7.1 的原文】
     否则页面上会同时出现「登录」按钮和「登出」按钮。AC-35 专门验证这一点。
-    因此本页不引 common.js 的 renderTopbar，也不留任何 <header> 元素。
+    因此本页不引 common.js 的 renderTopbar，也不留任何 <header class="topbar">。
+
+  【排布：左品牌栏 + 右表单卡，窄屏（<900px）折成上下两块】
+    左栏只承担"这是哪个系统 / 登录能拿到什么"，右侧始终是那一个登录框 ——
+    竖轴上的阅读顺序因此是"认识系统 → 动手登录"。
+
+  【图标一律内联 SVG，不用 emoji、不引 icon CDN】
+    理由同 [D-73]：本页运行时零外网依赖，且 emoji 在不同系统下字形不一。
 
   【三个查询串参数，各自有明确出处】
     ?mode=register   顶栏「注册」按钮（未登录形态）点进来时预置到注册 tab
@@ -21,58 +28,87 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>登录 · CppOJ</title>
-  <link rel="stylesheet" href="/css/app.css">
+  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
 </head>
 <body>
   <main class="auth">
-    <div class="card auth__card">
-      <h1 class="auth__title" id="auth-title">欢迎回来</h1>
-      <p class="auth__subtitle" id="auth-subtitle">登录后即可提交代码、查看提交历史与刷题进度</p>
+    <div class="auth__wrap">
 
-      <!-- 页面级消息：deleted=1 / expired=1 / 注册失败（1010、1005）共用这一块 -->
-      <div class="notice" id="notice" role="status" hidden></div>
+      <!-- 左栏：品牌 + 价值点。价值点说清"登录之后能拿到什么"，
+           三条都对应 §1.1 的核心价值，不写页面上没有的信息。 -->
+      <section class="auth__aside">
+        <div class="auth__brand">
+          <span class="auth__logo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8.5 6.5 4 12l4.5 5.5"></path>
+              <path d="M15.5 6.5 20 12l-4.5 5.5"></path>
+              <path d="M13.8 4.5 10.2 19.5"></path>
+            </svg>
+          </span>
+          <span class="auth__wordmark">CppOJ</span>
+        </div>
+        <p class="auth__tagline">面向求职面试的 C++ 在线判题系统。逐用例全量反馈，草稿与提交历史全部留存。</p>
 
-      <!-- 登录 / 注册切换。刻意用两个 button 而不是 radio：
-           radio 表达不了"当前模式"的可访问性状态，且样式难统一。 -->
-      <div class="auth__tabs" role="tablist">
-        <button type="button" class="auth__tab is-active" data-mode="login"
-                role="tab" aria-selected="true">登录</button>
-        <button type="button" class="auth__tab" data-mode="register"
-                role="tab" aria-selected="false">注册</button>
+        <ul class="auth__points">
+          <li><b><i>&gt;</i>逐用例反馈</b>每个用例的输入输出、耗时与内存全部可见</li>
+          <li><b><i>&gt;</i>草稿留存</b>切题、刷新、关掉浏览器都不丢代码</li>
+          <li><b><i>&gt;</i>单机部署</b>2 核可跑，fork + setrlimit 硬隔离</li>
+        </ul>
+      </section>
+
+      <!-- 登录 / 注册切换表单 -->
+      <div class="card auth__card">
+        <h1 class="auth__title" id="auth-title">欢迎回来</h1>
+        <p class="auth__subtitle" id="auth-subtitle">登录后即可提交代码、查看提交历史与刷题进度</p>
+
+        <!-- 页面级消息：deleted=1 / expired=1 / 注册失败（1010、1005）共用这一块 -->
+        <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+
+        <!-- 登录 / 注册切换。刻意用两个 button 而不是 radio：
+             radio 表达不了"当前模式"的可访问性状态，且样式难统一。 -->
+        <div class="seg" role="tablist" aria-label="登录或注册">
+          <button type="button" class="seg__btn is-active" data-mode="login"
+                  role="tab" aria-selected="true">登录</button>
+          <button type="button" class="seg__btn" data-mode="register"
+                  role="tab" aria-selected="false">注册</button>
+        </div>
+
+        <form id="auth-form" novalidate autocomplete="on">
+          <div class="field">
+            <label class="field__label" for="username">USERNAME</label>
+            <!-- autocomplete="username" 让浏览器记住的是【值】而不是替用户填上，
+                 且 D-46 要求不预填上次用户名，故这里不写 value。 -->
+            <input class="field__input" id="username" name="username" type="text"
+                   autocomplete="username" autocapitalize="none" autocorrect="off"
+                   spellcheck="false" placeholder="3–32 位，字母数字 _ -" required>
+            <div class="field__error" id="username-error"></div>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="password">PASSWORD</label>
+            <input class="field__input" id="password" name="password" type="password"
+                   autocomplete="current-password" placeholder="请输入密码" required>
+            <!-- 只在注册模式显示；登录不校验密码长度（理由见 auth.js 的 validate） -->
+            <div class="field__hint" id="password-hint"></div>
+            <div class="field__error" id="password-error"></div>
+          </div>
+
+          <button type="submit" class="btn btn--block btn--lg" id="submit">登录</button>
+        </form>
+
+        <p class="auth__foot">
+          未登录也可以浏览全部题面，登录后才能提交与收藏
+        </p>
       </div>
 
-      <form id="auth-form" novalidate autocomplete="on">
-        <div class="field">
-          <label class="field__label" for="username">用户名</label>
-          <!-- autocomplete="username" 让浏览器记住的是【值】而不是替用户填上，
-               且 D-46 要求不预填上次用户名，故这里不写 value。 -->
-          <input class="field__input" id="username" name="username" type="text"
-                 autocomplete="username" autocapitalize="none" autocorrect="off"
-                 spellcheck="false" placeholder="3–32 位，字母数字 _ -" required>
-          <div class="field__error" id="username-error"></div>
-        </div>
-
-        <div class="field">
-          <label class="field__label" for="password">密码</label>
-          <input class="field__input" id="password" name="password" type="password"
-                 autocomplete="current-password" placeholder="请输入密码" required>
-          <!-- 只在注册模式显示；登录不校验密码长度（理由见 auth.js 的 validate） -->
-          <div class="field__hint" id="password-hint"></div>
-          <div class="field__error" id="password-error"></div>
-        </div>
-
-        <button type="submit" class="btn btn--block btn--lg" id="submit">登录</button>
-      </form>
-
-      <p class="auth__foot">
-        CppOJ · 单机在线判题 · 未登录也可以浏览全部题面
-      </p>
     </div>
   </main>
 
   <!-- ES Module：auth.js 依赖 api.js，必须以 type="module" 引入（无构建步骤，§7.1） -->
   <script type="module">
-    import { initLoginPage } from '/js/auth.js';
+    import { initLoginPage } from '/js/auth.js?v=20261015-5';
     initLoginPage(document);
   </script>
 </body>

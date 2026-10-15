@@ -1,0 +1,226 @@
+/* =============================================================================
+   题目详情页 —— SPEC §9 T4.4~T4.8（页面级样式）
+   规格来源：§7.2 左右分栏线框 / [D-26] 可拖拽分栏 / [D-48] 字符画横向滚动
+             [D-63] 内存口径脚注 / [D-64] 归属分流文案 / [D-65] CE 不渲染用例表
+
+   【为什么单独一个文件而不是塞进 app.css】
+     §6.1 的分工：app.css 是"按钮/表单/表格/徽标"这类**跨五页复用**的元素，
+     本页专属的左右分栏、编辑器容器、结果面板换到别的页就毫无意义 ——
+     混在一起会让 app.css 逐渐变成一个谁都不敢删东西的堆。
+
+   【tab 样式已上移到 app.css】
+     「我的」页（history.html）有三层同款 tab，题目页只有一层。两页各写一份
+     `.tabs` 早晚会分叉（题目页调了圆角、我的页没调），故上移到 app.css 作为共用件。
+
+   【分栏为什么用 flex-basis 而不是 grid-template-columns】
+     拖拽时要改的是【一侧的宽度】。grid 改列宽会让另一侧跟着重排，
+     flex-basis 只动这一侧，配合 min-width 不容易把编辑器和题面压成 0。
+     默认 1:1（50%），落盘到 localStorage["split:problem"]，下次进来复原。
+   ============================================================================= */
+
+.page-problem { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ---- 工作台：左题面 / 右编辑器 ------------------------------------------------- */
+.workbench {
+  flex: 1;
+  min-height: 0;                     /* 关键：不给它 min-height:0，flex 子项撑破容器 */
+  display: flex;
+}
+.pane { min-width: 0; display: flex; flex-direction: column; }
+.pane-left {
+  flex: 0 0 50%;
+  overflow-y: auto;
+  padding: var(--sp-4) var(--sp-5) var(--sp-6);
+  border-right: 1px solid var(--c-border);
+}
+.pane-right { flex: 1; background: var(--c-surface); }
+
+.splitter {
+  flex: none;
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+  border: none;
+  position: relative;
+}
+/* 把手只在 hover / 聚焦时才显形：常驻一条竖线会被当成"这里能拖"的噪声 */
+.splitter::after {
+  content: "";
+  position: absolute;
+  inset: 0 3px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.splitter:hover::after, .splitter:focus-visible::after { background: var(--c-accent); }
+.splitter:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+
+/* ---- 题面头部 ---------------------------------------------------------------- */
+.pane__head { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-2); }
+.pane__head h1 { font-size: 19px; }
+.pane__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-4);
+  font-size: 12px;
+}
+.pane__meta .muted { display: flex; gap: var(--sp-3); }
+
+/* ---- Markdown 渲染结果（题面与提示共用同一套排版）---------------------------- */
+.markdown { line-height: 1.75; color: var(--c-text); }
+.markdown h2 { font-size: 16px; margin: var(--sp-5) 0 var(--sp-2); }
+.markdown h3 { font-size: 14px; margin: var(--sp-4) 0 var(--sp-2); color: var(--c-text-muted); }
+.markdown p { margin: 0 0 var(--sp-3); }
+.markdown ul, .markdown ol { margin: 0 0 var(--sp-3); padding-left: var(--sp-5); }
+.markdown li { margin-bottom: 2px; }
+.markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--c-surface-2);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+/* [D-48]：字符画必须横向滚动而不换行 —— 换行会把树/图的形状彻底破坏 */
+.markdown pre {
+  overflow-x: auto;
+  white-space: pre;
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  background: var(--c-surface-2);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.markdown pre code { padding: 0; background: none; }
+.markdown table { width: 100%; border-collapse: collapse; margin-bottom: var(--sp-3); font-size: 13px; }
+.markdown th, .markdown td { padding: 6px var(--sp-3); border: 1px solid var(--c-border); text-align: left; }
+.markdown th { background: var(--c-surface-2); font-weight: 600; }
+.markdown blockquote {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-left: 3px solid var(--c-border-strong);
+  color: var(--c-text-muted);
+}
+
+/* ---- 最近提交（点一行 = 读那条提交的结果）------------------------------------- */
+.recentrow {
+  display: grid;
+  grid-template-columns: 84px auto 1fr;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2);
+  border: none;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--c-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.recentrow:hover { background: var(--c-accent-soft); }
+.recentrow:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+.recentrow__time { font-family: var(--font-mono); font-size: 12px; color: var(--c-text-muted); }
+.recentrow__detail { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- 下一题建议卡 [D-59] ------------------------------------------------------ */
+.nextcard {
+  margin-top: var(--sp-5);
+  padding: var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--radius);
+  background: var(--c-surface);
+  display: grid;
+  gap: 2px;
+}
+.nextcard b { font-size: 13px; color: var(--c-text-muted); font-weight: 600; }
+.nextcard a { font-size: 15px; font-weight: 600; }
+.nextcard span { font-size: 12px; }
+
+/* ---- 工具栏与编辑器 ----------------------------------------------------------- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+}
+.toolbar__lang {
+  padding: 2px var(--sp-2);
+  border-radius: 4px;
+  background: var(--c-surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+.toolbar #reset { margin-left: auto; }
+
+.editor { flex: 1; min-height: 0; position: relative; }
+.editor .ace_editor { height: 100% !important; font-family: var(--font-mono) !important; }
+/* 降级 textarea：ace 没加载时顶上来，尺寸与 ace 容器一致 */
+.editor__fallback {
+  width: 100%;
+  height: 100%;
+  padding: var(--sp-3);
+  border: none;
+  resize: none;
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+/* Ace 降级提示条：贴在编辑器下方，不遮挡代码 */
+.editor-warn { margin: 0; border-radius: 0; border-left-width: 3px; }
+
+/* ---- 状态区：提交前给提示，评测中转圈，终态给结论 ---------------------------- */
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  font-size: 13px;
+  color: var(--c-text-muted);
+}
+.status[data-state="judging"] { color: var(--c-accent); font-weight: 500; }
+.status[data-state="judging"]::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--c-accent-soft);
+  border-top-color: var(--c-accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.status[data-state="done"] { color: var(--c-text); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- 内联登录框 [D-43] -------------------------------------------------------- */
+.inline-login { padding: var(--sp-3); border-top: 1px solid var(--c-border); background: var(--c-accent-soft); }
+.inline-login p { margin: 0 0 var(--sp-2); font-size: 13px; }
+.inline-login__row { display: flex; gap: var(--sp-2); }
+.inline-login__row .field__input { min-height: 34px; }
+
+/* ---- 窄屏：左右分栏折成上下（§1.4 只要求桌面，但折行不能让功能消失）---------- */
+@media (max-width: 900px) {
+  .page-problem { height: auto; overflow: visible; }
+  .workbench { flex-direction: column; }
+  .pane-left { flex: none; border-right: none; border-bottom: 1px solid var(--c-border); }
+  .pane-right { min-height: 70vh; }
+  .splitter { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status[data-state="judging"]::before { animation: none; border-top-color: var(--c-accent); }
+}

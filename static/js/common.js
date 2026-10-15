@@ -22,7 +22,7 @@
 //   这是该组件唯一的例外，因此它做成"由页面主动调用"而不是"自动挂载"。
 // =============================================================================
 
-import { currentUser, logout as apiLogout, get } from './api.js';
+import { currentUser, logout as apiLogout, get } from './api.js?v=20261015-5';
 
 /** HTML 转义。所有把服务端字符串插进 innerHTML 的地方都必须过它。 */
 export function escapeHtml(raw) {
@@ -33,6 +33,22 @@ export function escapeHtml(raw) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+/**
+ * 角色徽标的 HTML 片段（[D-41] T4.18）。
+ *
+ * 【为什么抽出来而不是在顶栏里写死】
+ *   首页概览条的「你好，alice [管理员]」与顶栏是同一段逻辑（SPEC T4.15 明写
+ *   "复用这段逻辑，不另写一份"）。两处各写一遍，早晚会出现"顶栏改了徽标、
+ *   概览条没改"的不一致 —— 而这种不一致只有肉眼能发现。
+ *
+ *   注意普通用户返回【空串】：不渲染任何徽标，也不显示"普通用户"字样。
+ */
+export function roleBadgeHtml(user) {
+  if (user === null || user === undefined || user.role !== 'admin') return '';
+  return '<span class="badge badge--admin">管理员</span>';
+}
+
 
 /**
  * 渲染顶栏。
@@ -60,10 +76,9 @@ export async function renderTopbar(mount, options = {}) {
     .join('');
 
   // [D-41]：普通用户【不渲染任何角色徽标】（不显示"普通用户"字样）——
-  // 那是一条对每个用户都无信息量的标签。
-  const badgeHtml = user !== null && user.role === 'admin'
-    ? '<span class="badge badge--admin">管理员</span>'
-    : '';
+  // 那是一条对每个用户都无信息量的标签。片段由 roleBadgeHtml 统一生成，
+  // 首页概览条复用它，两处不可能出现"一个改了另一个没改"。
+  const badgeHtml = roleBadgeHtml(user);
 
   const rightHtml = user === null
     ? '<a class="btn btn--ghost" href="/login.html">登录</a>' +
@@ -128,14 +143,55 @@ export function redirectToLogin(extra = '') {
 
 // ---- 相对时间（§7.1 时间本地化；T4.12 的基础件）--------------------------------
 
+/** 把 UTC 时间串转成 Date。存储是 UTC（[D-17]），显示是本地。 */
+export function parseUtcTime(utcText) {
+  if (!utcText) return null;
+  // 后端下发的是 "2026-10-14 20:01:02"（空格分隔、无时区），
+  // 只有带 Z 或带偏移的形式才原样交给 Date —— 否则它会被当本地时间解析，整体差 8 小时
+  const when = new Date(utcText.endsWith('Z') || utcText.includes('+') ? utcText : `${utcText}Z`);
+  return Number.isNaN(when.getTime()) ? null : when;
+}
+
 /** 把 UTC ISO 字符串转成本地可读时间。存储是 UTC（[D-17]），显示是本地。 */
 export function formatLocalTime(utcText) {
-  if (!utcText) return '';
-  const when = new Date(utcText.endsWith('Z') || utcText.includes('+') ? utcText : `${utcText}Z`);
-  if (Number.isNaN(when.getTime())) return utcText;
+  const when = parseUtcTime(utcText);
+  if (when === null) return utcText || '';
   const pad = (n) => String(n).padStart(2, '0');
   return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ` +
          `${pad(when.getHours())}:${pad(when.getMinutes())}`;
+}
+
+/**
+ * 相对时间（T4.12）：「刚刚 / 3 分钟前 / 昨天 15:24 / 10-14 20:01」。
+ *
+ * 【为什么列表里要相对时间、详情里要绝对时间】
+ *   扫历史列表时用户问的是"我刚才是什么时候提交的"（相对），
+ *   复盘某条提交时问的是"准确几点几分"（绝对）—— 后者交给 title 属性，
+ *   于是同一条数据既好扫又能查准，不必让用户把鼠标停在每一行上。
+ *
+ * 【为什么超过 24h 就只到"月-日"】
+ *   再往前就写成 "10-12"，同年之内不必带年份；跨年时补上年份。
+ */
+export function relativeTime(utcText) {
+  const when = parseUtcTime(utcText);
+  if (when === null) return utcText || '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}`;
+  const diff = Date.now() - when.getTime();
+
+  if (diff >= 0 && diff < 60 * 1000) return '刚刚';
+  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)} 分钟前`;
+  if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / 3600000)} 小时前`;
+
+  const yesterday = new Date(when.getTime());
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = yesterday.toDateString() === new Date().toDateString();
+  if (isYesterday) return `昨天 ${clock}`;
+
+  const md = `${pad(when.getMonth() + 1)}-${pad(when.getDate())}`;
+  return when.getFullYear() === new Date().getFullYear()
+    ? `${md} ${clock}`
+    : `${when.getFullYear()}-${md} ${clock}`;
 }
 
 export { currentUser, get };

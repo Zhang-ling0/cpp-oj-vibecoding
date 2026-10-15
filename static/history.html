@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<!--
+  「我的」页 —— SPEC §9 M4 T4.10 [D-39]（提交记录 / 掌握分布 / 账户设置）
+  规格来源：§7.1「我的」页三 tab 线框 / §7.3 关键交互 / §7.4 空态与错误态
+            §6.3 GET /api/submissions / DELETE /api/submissions/{id}
+                 POST /api/submissions/{id}/retry / POST /api/auth/password
+
+  【为什么是三个 tab 而不是三个页面】[D-39]
+    提交记录、掌握分布、账户设置的**数据同源**（都从 submissions / users 聚合），
+    拆成三页意味着同一份数据在多个页面重复请求，两处口径迟早漂移。
+    合并的代价是"页面职责变宽"，用 hash 分 tab 缓解。
+
+  【tab 状态放 hash】
+    因此可以直接分享 `/history.html#progress` 给别人，刷新后停在原 tab，
+    且不需要为此加任何服务端路由。
+
+  【三个 tab 共用【一次】overview 请求】(AC-24 硬要求)
+    `overview.js` 在模块级缓存 Promise，切 tab 与 tab1 翻页都不重取。
+
+  【本页【只读自己的数据】：后端按 user_id 过滤，admin 也不放开他人】(AC-20)
+    顶栏有「运维」入口但本页没有任何"看别人提交"的能力。
+
+  【账户设置不做"注销账号"】
+    那是 T4.29：需要输密码 + 逐项列出待删数据量的二次确认（D-57），
+    与"改密码"的风险等级完全不同，故不在本条里顺手加。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>我的 · CppOJ</title>
+  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
+</head>
+<body>
+  <!-- 顶栏由 common.js 渲染；「我的」入口在未登录形态下【不渲染】（D-52） -->
+  <header id="topbar"></header>
+
+  <main class="mine">
+    <div class="mine__head">
+      <div>
+        <h1>我的</h1>
+        <p class="muted" id="mine-sub">提交记录 · 掌握分布 · 账户设置</p>
+      </div>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tabs__btn is-on" data-tab="records" role="tab" aria-selected="true">提交记录</button>
+      <button type="button" class="tabs__btn" data-tab="progress" role="tab" aria-selected="false">掌握分布</button>
+      <button type="button" class="tabs__btn" data-tab="account" role="tab" aria-selected="false">账户设置</button>
+    </div>
+
+    <!-- tab1 提交记录（与 v1.2 行为完全一致，零改动） -->
+    <section class="card panel" id="pane-records" role="tabpanel">
+      <h2 class="panel__title">提交记录 <span class="muted" id="sub-total"></span></h2>
+
+      <div class="subfilters">
+        <div class="filters__field">
+          <label class="filters__label" for="f-problem">题目</label>
+          <select class="field__input" id="f-problem"><option value="">全部题目</option></select>
+        </div>
+        <div class="filters__field">
+          <label class="filters__label" for="f-verdict">结论</label>
+          <select class="field__input" id="f-verdict">
+            <option value="">全部</option>
+            <option value="AC">通过</option>
+            <option value="WA">答案错误</option>
+            <option value="TLE">超时</option>
+            <option value="MLE">内存超限</option>
+            <option value="RE">运行错误</option>
+            <option value="CE">编译错误</option>
+            <option value="JE">平台错误</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>时间</th><th>题目</th><th>结论</th>
+              <th class="num">用例</th><th class="num">耗时</th><th class="num">峰值RSS</th><th>展开</th>
+            </tr>
+          </thead>
+          <tbody id="sub-rows"></tbody>
+        </table>
+      </div>
+      <nav id="sub-pager" class="pager" aria-label="分页"></nav>
+    </section>
+
+    <!-- tab2 掌握分布 -->
+    <section class="card panel" id="pane-progress" role="tabpanel" hidden></section>
+
+    <!-- tab3 账户设置 -->
+    <section class="card panel" id="pane-account" role="tabpanel" hidden>
+      <h2 class="panel__title">账户设置</h2>
+      <div class="account__row">
+        <span class="account__label">用户名</span>
+        <span id="acc-username">—</span>
+        <span class="muted" style="font-size:12px">不可修改 —— 改用户名会破坏与 OJ_ADMIN_USERNAMES 的按名绑定</span>
+      </div>
+      <div class="account__row">
+        <span class="account__label">角色</span>
+        <span id="acc-role">—</span>
+        <span class="muted" style="font-size:12px">由 .env 的 OJ_ADMIN_USERNAMES 声明式指定，调整后需重启</span>
+      </div>
+
+      <form class="account__form" id="pw-form" novalidate>
+        <h3 class="panel__title" style="margin-top:var(--sp-5)">修改密码</h3>
+        <div class="field">
+          <label class="field__label" for="old-password">OLD PASSWORD</label>
+          <input class="field__input" id="old-password" type="password" autocomplete="current-password" placeholder="当前密码">
+          <div class="field__error" id="old-password-error"></div>
+        </div>
+        <div class="field">
+          <label class="field__label" for="new-password">NEW PASSWORD</label>
+          <input class="field__input" id="new-password" type="password" autocomplete="new-password" placeholder="6–64 位">
+          <div class="field__error" id="new-password-error"></div>
+        </div>
+        <div class="field">
+          <label class="field__label" for="new-password2">CONFIRM</label>
+          <input class="field__input" id="new-password2" type="password" autocomplete="new-password" placeholder="再输入一次">
+          <div class="field__error" id="new-password2-error"></div>
+        </div>
+        <div>
+          <button type="submit" class="btn" id="pw-submit">确认修改</button>
+          <span class="muted" style="font-size:12px;margin-left:var(--sp-2)">修改后其他设备的登录将失效，当前设备保持登录</span>
+        </div>
+      </form>
+
+      <div class="account__row" style="margin-top:var(--sp-5);border-bottom:none">
+        <span class="account__label">登出</span>
+        <button type="button" class="btn btn--ghost" id="logout">登出当前账号</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { initHistoryPage } from '/js/history.js?v=20261015-5';
+    initHistoryPage(document);
+  </script>
+</body>
+</html>

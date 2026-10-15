@@ -1,71 +1,102 @@
 <!DOCTYPE html>
 <!--
-  CppOJ 管理页（占位）—— SPEC §9 M4 T4.14 `[D-37]`
+  CppOJ 运维概览页 —— SPEC §9 M4 T4.14 `[D-37]`（占位页 → 完整实现）
+  规格来源：§7.1「仅 admin：系统运行状态卡片 + 用户清单表。无任何写操作」
+            §7.3 顶栏运维入口（条件渲染由 common.js 完成）
+            §6.3.3 / API.md §7.1 GET /api/admin/overview
 
-  【为什么是占位页】
-    D-37 把 admin 的能力限定为"看"：`GET /api/admin/overview` 一个只读端点 + 一个只读页面。
-    真正的页面实现（T4.14 完整版）与它的前端脚本 `js/admin.js` 目前都还是 0 字节的占位文件，
-    本项目当前的开发重心是 API 契约（T3/T5），页面排在后面（SPEC §9 明确允许先砍页面）。
+  【本页【严格只读】，这不是"还没做写操作"，是【刻意不做】[D-37]]
+    没有表单提交、没有删除/禁用/改角色的按钮、没有 impersonation。
+    角色调整的唯一途径是改 `.env` 的 `OJ_ADMIN_USERNAMES` 后重启 ——
+    与 §2.2 既定的「运行时改题需重启」是同一套运维哲学，不引入第二套配置真源。
+    页面底部的说明文字是这一约束的**唯一呈现**：它必须存在，否则管理员
+    会在这页上找"为什么没有改角色的按钮"，找了没找到就当成缺功能。
 
-    但 0 字节的 .html 会被浏览器渲染成一个完全空白的页面：HTTP 200 + 空 body，
-    看起来像"服务坏了"。这份占位页要解决的就是这个歧义 —— 明确告诉打开它的人：
-    **这里只有一个只读 API，页面还没做**，以及怎么用 curl 直接看。
+  【允许的唯一交互是"重新拉取"】
+    刷新按钮重发的是同一个 GET，不改变任何状态。
 
-  【为什么不引 js/admin.js】
-    它是 0 字节（引了等于引了个空文件）。同理 api.js 里目前没有 admin 相关方法，
-    所以本页【自包含】：一个按钮 + 一段内联 fetch，用完即弃，等真正的 admin.js 落地时整体替换。
+  【未登录 / 非管理员】
+    1002 → 跳登录页带 redirect（D-43 之外的"整页不可看"场景）
+    1003 → 显示无权限提示并**自动跳回 list.html**（T4.14 明确要求）
 
-  【role 的真源不在本页】
-    管理员身份由 `.env` 的 `OJ_ADMIN_USERNAMES` 声明式指定（SPEC §6.3.1 `[D-37]`），
-    本页不做任何提权操作。顺带说明：启动角色同步（T3.11）尚未接线，所以当前改 .env 不会生效。
+  【样式】沿用全站浅色靛蓝主题与 app.css 的既有类，本页只补 admin.css 里
+    真正专属的那几块（状态栅格 / 运行态行 / 用户表列宽），不重复定义按钮、
+    表格、徽标 —— §6.1 的分工：app.css 管复用元素，页面 css 管页面结构。
 -->
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>管理 · CppOJ</title>
-  <link rel="stylesheet" href="/css/app.css">
+  <title>运维 · CppOJ</title>
+  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
+  <link rel="stylesheet" href="/css/admin.css?v=20261015-5">
 </head>
 <body>
-  <main class="auth">
-    <div class="card auth__card">
-      <h1 class="auth__title">管理面板</h1>
-      <p class="auth__subtitle">
-        管理能力当前是<strong>严格只读</strong>的，且只有一个 API 端点。页面尚未实现（T4.14）。
-      </p>
+  <!-- 顶栏由 common.js 的 renderTopbar() 渲染；「运维」入口按 role 条件渲染 -->
+  <header id="topbar"></header>
 
-      <p class="auth__subtitle">
-        <code>GET /api/admin/overview</code> —— 需要 <code>role = "admin"</code>；
-        未登录回 <code>1002</code>，非管理员回 <code>1003</code>。
-        管理员身份只能通过改 <code>.env</code> 的 <code>OJ_ADMIN_USERNAMES</code> 再重启获得，
-        页面与 API 都不提供提权入口（SPEC §6.3.1）。
-      </p>
-
-      <button class="btn" id="fetch-btn" type="button">以当前登录身份拉取</button>
-      <pre id="out" style="margin-top:16px;white-space:pre-wrap;word-break:break-all"></pre>
-
-      <p class="auth__subtitle" style="margin-top:16px">或者直接用 curl：</p>
-      <pre style="white-space:pre-wrap">curl -c /tmp/oj.jar -X POST http://127.0.0.1:8080/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123"}'
-curl -b /tmp/oj.jar http://127.0.0.1:8080/api/admin/overview</pre>
+  <main class="page">
+    <div class="page__head">
+      <div>
+        <h1>运维概览</h1>
+        <p class="muted">严格只读 · 单一数据源 <span class="mono">GET /api/admin/overview</span></p>
+      </div>
+      <button type="button" id="refresh" class="btn btn--ghost">刷新</button>
     </div>
+
+    <!-- 无权限（1003）。先让人看清"为什么"，1.5s 后再按 T4.14 的要求跳回题库 -->
+    <section id="denied" class="card block" hidden>
+      <h2 class="block__title">无权访问</h2>
+      <p class="muted">
+        当前账号不是管理员（服务端返回 1003）。管理员身份只能通过
+        <span class="mono">.env</span> 的 <span class="mono">OJ_ADMIN_USERNAMES</span> 声明后重启获得。
+      </p>
+      <p class="muted">即将返回题库…<a href="/list.html">立即返回</a></p>
+    </section>
+
+    <!-- 系统状态 -->
+    <section class="card block">
+      <h2 class="block__title">系统状态</h2>
+      <div id="sys-stats" class="sysstats"></div>
+      <div id="sys-runtime" class="runtime"></div>
+      <p id="sys-note" class="block__note"></p>
+    </section>
+
+    <!-- 用户清单 -->
+    <section class="card block">
+      <h2 class="block__title">用户清单 <span id="user-count" class="muted"></span></h2>
+      <div class="table-wrap">
+        <table class="table admin-users">
+          <thead>
+            <tr>
+              <th>用户名</th>
+              <th>角色</th>
+              <th>注册时间</th>
+              <th class="num">提交</th>
+              <th class="num">AC</th>
+              <th class="num">AC 率</th>
+              <th class="num">已通过</th>
+              <th class="num">尝试过</th>
+              <th class="num">收藏</th>
+              <th>最近提交</th>
+              <th>最近结论</th>
+            </tr>
+          </thead>
+          <tbody id="users"></tbody>
+        </table>
+      </div>
+      <p class="block__note">
+        <b>本页不提供任何写操作</b>：没有禁用 / 删除 / 改角色 / impersonation。
+        角色是 <span class="mono">.env</span> 里 <span class="mono">OJ_ADMIN_USERNAMES</span>
+        的声明式名单（<span class="mono">D-37</span>），调整后需重启服务；
+        这样"配置"与"页面"不会各自成为一条能互相覆盖的真源。
+      </p>
+    </section>
   </main>
 
-  <script>
-    // 只做一件事：把端点的原始响应打出来。用完即弃的占位逻辑。
-    document.getElementById('fetch-btn').addEventListener('click', function () {
-      var out = document.getElementById('out');
-      out.textContent = '请求中…';
-      // credentials: 'same-origin' —— 前后端同源部署（CORS 未开启，见 API.md §8.1），
-      // 不带它浏览器不会带上 sid Cookie，于是只会拿到 1002。
-      fetch('/api/admin/overview', { credentials: 'same-origin' })
-        .then(function (res) { return res.json().then(function (body) { return [res.status, body]; }); })
-        .then(function (pair) {
-          out.textContent = 'HTTP ' + pair[0] + '\n' + JSON.stringify(pair[1], null, 2);
-        })
-        .catch(function (e) { out.textContent = '请求失败：' + e; });
-    });
+  <script type="module">
+    import { initAdminPage } from '/js/admin.js?v=20261015-5';
+    initAdminPage(document);
   </script>
 </body>
 </html>

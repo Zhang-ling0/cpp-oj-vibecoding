@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<!--
+  CppOJ 落地页 —— 大屏门面（居中排布 · 极光渐变 · Bento 网格）
+  定位：**对外的门面**，不是工作台。工作台仍然是 list.html（[D-38]：「首页 = list.html 兼落地页，不新增首页」）。
+
+  【与 D-38 的关系：这是一次显式偏离，理由与边界写在 SPEC §7.1】
+    list.html 退回**纯工作台**，本页只负责「这是什么 / 怎么用 / 凭什么值得用」。
+    ⚠️ 边界：**list.html 仍是唯一的功能入口**，本页不新增任何接口、不改任何决策。
+
+  【"炫"从哪来，三件事，不多】
+    ① 极光（aurora）：两三个大号径向渐变球缓慢漂移 —— 给出"光"和"深度"；
+    ② Bento 网格：大小不一的卡片拼贴，避免"四张一模一样的卡"那种呆板；
+    ③ 渐变文字 + 玻璃卡片 + 悬停发光。
+    **克制线**：正文对比度仍在 AA 以上、动画只在两处（极光漂移与标签跑马灯）、
+    且都有 `prefers-reduced-motion` 降级 —— 炫不能以"看不清"和"晃眼睛"为代价。
+
+  【页面上的每个数字都有出处，没有一处是编的】
+    题目数/标签数来自匿名可读的 `/api/problems`、`/api/tags`；
+    其余是本项目自己的实测值（2 核 2G、worker 2、闸门 4、3s/128MB、7 天会话）。
+    「界面示意」那一块是**样式演示用的示例数据**，已明确标注 —— 真实结果来自判题。
+
+  【顶栏仍是 common.js 的同一个组件】[D-52]：不写第三套。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CppOJ · 面向求职面试的 C++ 在线判题系统</title>
+  <meta name="description" content="单机可运行的 C++ 在线判题系统：逐用例全量反馈、草稿与提交历史留存、fork + setrlimit 硬隔离。">
+  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
+</head>
+<body>
+  <header id="topbar"></header>
+
+  <main class="landing">
+    <!-- ================= Hero：居中，一屏说完 ================= -->
+    <section class="hero">
+      <p class="hero__eyebrow">C++ Online Judge · 单机部署 · 无需注册即可读题</p>
+      <h1 class="hero__title">
+        为面试备战而生的<br>
+        <span class="grad">C++ 在线判题系统</span>
+      </h1>
+      <p class="hero__sub">
+        通用 OJ 要么太重、要么不给逐用例反馈。这里每个用例的输入、你的输出、期望输出、
+        耗时与内存都摆在明面上，草稿与提交历史全部留存 —— 让你能精确定位到
+        <b>第几个用例开始错</b>，而不是只知道「错了」。
+      </p>
+      <div class="hero__cta">
+        <a class="btn btn--lg" href="/list.html">开始刷题</a>
+        <a class="btn btn--ghost btn--lg" href="/login.html">登录</a>
+      </div>
+
+      <!-- 真实数字；匿名取不到就整行隐藏，不显示 0 -->
+      <dl class="hero__stats" id="live-stats" hidden>
+        <div><dt>题目</dt><dd id="stat-problems">—</dd></div>
+        <div><dt>算法标签</dt><dd id="stat-algo">—</dd></div>
+        <div><dt>来源标签</dt><dd id="stat-source">—</dd></div>
+        <div><dt>会话有效期</dt><dd>7 天</dd></div>
+      </dl>
+    </section>
+
+    <!-- ================= 标签跑马灯：真实标签 + 一点"活气" ================= -->
+    <div class="ticker" id="ticker" aria-hidden="true" hidden></div>
+
+    <!-- ================= Bento：六块能力，大小错落 ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// WHAT IT GIVES YOU</p>
+      <h2 class="section__title">它多做的六件事</h2>
+
+      <div class="bento">
+        <article class="tile tile--wide">
+          <span class="feature__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path>
+              <path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>
+            </svg>
+          </span>
+          <h3>逐用例全量反馈</h3>
+          <p>不只告诉你「错了」，而是把每个用例的输入、你的输出、期望输出、耗时与峰值 RSS 逐行列出来。错误边界一眼可见 —— 这是刷题时最需要、也最难自己造出来的信息。</p>
+        </article>
+
+        <article class="tile">
+          <span class="feature__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+              <path d="M17 21v-8H7v8"></path><path d="M7 3v5h8"></path>
+            </svg>
+          </span>
+          <h3>草稿永不掉</h3>
+          <p>输入停顿 0.8 秒就自动存草稿，切题、刷新、关浏览器都在；多标签页同时改同一题会<b>先问你</b>再覆盖。</p>
+        </article>
+
+        <article class="tile">
+          <span class="feature__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"></path>
+            </svg>
+          </span>
+          <h3>执行是真隔离</h3>
+          <p><span class="mono">fork</span> + <span class="mono">setrlimit</span>：CPU 时间与地址空间都有硬上限，2 核 2G 也跑得动。</p>
+        </article>
+
+        <article class="tile tile--tall">
+          <span class="feature__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path>
+            </svg>
+          </span>
+          <h3>架构本身能讲</h3>
+          <p>测试程序生成器、逐用例 fork 执行、线程池 + 全局闸门、声明式角色 —— 每一条都能在面试里讲成一分钟的故事。</p>
+          <ul class="ticklist">
+            <li>题库 JSON 是唯一真源，启动时同步入库</li>
+            <li>用户代码与题库 harness 物理隔离</li>
+            <li>并发参数按实测机器算，不按经验值抄</li>
+            <li>数据全部留在本机，断网也能刷题</li>
+          </ul>
+        </article>
+
+        <article class="tile">
+          <span class="feature__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>
+            </svg>
+          </span>
+          <h3>异步 + 轮询</h3>
+          <p>提交立刻返回 id，前端每 1.5 秒拉一次结果，并告诉你「前面还有 N 个评测」。刷新页面会自动恢复轮询。</p>
+        </article>
+
+        <article class="tile">
+          <span class="feature__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 21l-4.3-4.3"></path><circle cx="11" cy="11" r="7"></circle>
+            </svg>
+          </span>
+          <h3>找得到、复盘得了</h3>
+          <p>按关键词、难度、算法标签、来源标签、我的进度组合筛选；同题两次提交可并排 diff，一键回填编辑器。</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- ================= 七种结论：把"判题"这件事摊开 ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// EVERY OUTCOME IS NAMED</p>
+      <h2 class="section__title">七种结论，一个都不含糊</h2>
+      <p class="section__lead">判题最没用的输出是「运行失败」。这里把每一种可能都给了名字、给出了人话解释。</p>
+
+      <div class="verdicts">
+        <div class="vcard vcard--ac"><b>AC</b><span>全部用例通过</span></div>
+        <div class="vcard vcard--wa"><b>WA</b><span>答案错误：输出与期望不符</span></div>
+        <div class="vcard vcard--tle"><b>TLE</b><span>超出 CPU 时间限制</span></div>
+        <div class="vcard vcard--mle"><b>MLE</b><span>超出地址空间上限</span></div>
+        <div class="vcard vcard--re"><b>RE</b><span>运行错误：崩溃或非法访问</span></div>
+        <div class="vcard vcard--ce"><b>CE</b><span>编译错误：给出行号与原始 g++ 输出</span></div>
+        <div class="vcard vcard--je"><b>JE</b><span>平台错误：可一键重跑</span></div>
+      </div>
+    </section>
+
+    <!-- ================= 工作原理：一条五步的链路 ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// WHAT HAPPENS ON SUBMIT</p>
+      <h2 class="section__title">一次提交，走了哪五步</h2>
+
+      <ol class="flow">
+        <li class="flow__step">
+          <span class="flow__no mono">01</span>
+          <b>入队</b>
+          <span>写一条 <span class="mono">pending</span> 记录，返回 id 与队列位置，不阻塞请求</span>
+        </li>
+        <li class="flow__step">
+          <span class="flow__no mono">02</span>
+          <b>编译</b>
+          <span><span class="mono">g++ -c user.cpp</span>，再链接题库生成的 tester —— 题库代码永不被改动</span>
+        </li>
+        <li class="flow__step">
+          <span class="flow__no mono">03</span>
+          <b>逐用例执行</b>
+          <span>每个用例一次 <span class="mono">fork</span>，套 CPU / 内存 / 文件大小三重 rlimit</span>
+        </li>
+        <li class="flow__step">
+          <span class="flow__no mono">04</span>
+          <b>解析协议</b>
+          <span>harness 按 <span class="mono">@@OJ@@</span> 协议回报结果，一条也没有就判平台错误</span>
+        </li>
+        <li class="flow__step">
+          <span class="flow__no mono">05</span>
+          <b>写回</b>
+          <span>单事务写入逐用例明细与汇总列，前端下一次轮询就能渲染出表格</span>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ================= 结果面板示意 ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// THE PAYOFF</p>
+      <h2 class="section__title">提交完，你看到的是这张表</h2>
+
+      <div class="demo">
+        <div class="demo__bar">
+          <span class="demo__dot"></span><span class="demo__dot"></span><span class="demo__dot"></span>
+          <span class="demo__path mono">/api/submissions/91</span>
+          <span class="pill pill--err">界面示意 · 示例数据</span>
+        </div>
+        <div class="demo__body">
+          <div class="result__head">
+            <span class="verdict verdict--wa">答案错误</span>
+            <span>通过 2 / 3</span>
+            <span>总耗时 9 ms</span>
+            <span>峰值RSS 2.0 MB</span>
+          </div>
+          <table class="table result__table">
+            <thead>
+              <tr><th>#</th><th>输入</th><th>你的输出</th><th>期望输出</th><th>耗时</th><th>结论</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="mono">0</td><td class="mono">[2,7,11,15], 9</td><td class="mono">[0,1]</td><td class="mono">[0,1]</td><td class="mono">3 ms</td><td><span class="verdict verdict--ac">AC</span></td></tr>
+              <tr><td class="mono">1</td><td class="mono">[3,2,4], 6</td><td class="mono">[1,2]</td><td class="mono">[1,2]</td><td class="mono">2 ms</td><td><span class="verdict verdict--ac">AC</span></td></tr>
+              <tr class="case case--no"><td class="mono">2</td><td class="mono">[3,3], 6</td><td class="mono">[0,0]</td><td class="mono">[0,1]</td><td class="mono">4 ms</td><td><span class="verdict verdict--wa">WA</span></td></tr>
+            </tbody>
+          </table>
+          <p class="result__foot">ⓘ 限制口径：地址空间 128 MB ｜ 列为实测峰值 RSS，仅供参考</p>
+        </div>
+      </div>
+      <p class="demo__note">
+        最后一行被整行标红，但颜色不是唯一线索 —— 「结论」列里还有 <span class="mono">WA</span> 两个字。
+        内存列写「峰值 RSS」而不是「内存」：限制是地址空间口径、度量是 RSS 口径，两者不是一个量，
+        把这个差异写在界面上，「报 MLE 但只有 30MB」才不会被当成 bug。
+      </p>
+    </section>
+
+    <!-- ================= 与通用 OJ 的差别 ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// WHY NOT JUST USE A BIG OJ</p>
+      <h2 class="section__title">和通用 OJ 差在哪</h2>
+      <div class="table-wrap">
+        <table class="table compare">
+          <thead><tr><th>维度</th><th>CppOJ</th><th>通用 OJ</th></tr></thead>
+          <tbody>
+            <tr><td>逐用例明细</td><td class="ok">全量展示输入/输出/耗时/内存</td><td>通常只给一个错误用例</td></tr>
+            <tr><td>草稿</td><td class="ok">本地自动保存，多标签页冲突会先问</td><td>多数没有草稿</td></tr>
+            <tr><td>离线可用</td><td class="ok">前端三库 vendored，运行时零外网依赖</td><td>依赖 CDN，断网即降级</td></tr>
+            <tr><td>部署成本</td><td class="ok">单进程 + MySQL，一条 make run</td><td>依赖多套中间件</td></tr>
+            <tr><td>提交历史</td><td class="ok">代码全文 + 逐用例快照，改题也能回放</td><td>常只保留最近若干条</td></tr>
+            <tr><td>需要注册</td><td class="ok">不注册也能读全部题面</td><td>必须注册</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="section__lead" style="margin-top:var(--sp-4)">
+        它当然不是通用 OJ：没有题解社区、没有排行榜、没有多语言、没有付费与账号体系。
+        它只做一件事 —— 让你在准备面试的这段时间里，把「定位错误」这件事做得比别处更省力。
+      </p>
+    </section>
+
+    <!-- ================= 技术规格：给要看底的人 ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// UNDER THE HOOD</p>
+      <h2 class="section__title">技术规格</h2>
+      <div class="specs">
+        <div class="spec"><b>后端</b><span>C++17 · cpp-httplib 0.60.1 · 单进程 + 8 线程 HTTP 池</span></div>
+        <div class="spec"><b>判题</b><span>worker 2 · 全局并发闸门 4（= 2 × worker）· 单用户闸门 2</span></div>
+        <div class="spec"><b>存储</b><span>MySQL 8 · 11 张表 · 角色由 .env 声明式名单指定</span></div>
+        <div class="spec"><b>前端</b><span>原生三件套，无框架无构建步骤 · Ace 1.32.7 编辑器</span></div>
+        <div class="spec"><b>依赖</b><span>marked + DOMPurify + Ace，全部 vendored 到 static/vendor</span></div>
+        <div class="spec"><b>默认限制</b><span>CPU 3 s / 地址空间 128 MB（每题可在题库 JSON 里覆盖）</span></div>
+      </div>
+    </section>
+
+    <!-- ================= FAQ ================= -->
+    <section class="landing__section">
+      <p class="section__eyebrow">// QUESTIONS</p>
+      <h2 class="section__title">常见问题</h2>
+      <div class="faq">
+        <details>
+          <summary>必须注册才能看题吗？</summary>
+          <p>不必。未登录可以打开任意题目的完整题面与提示，只是不能提交、不能收藏、看不到自己的统计。</p>
+        </details>
+        <details>
+          <summary>代码会被拿去做什么？</summary>
+          <p>只在你自己这台机器上编译与执行。SQL 全部走预处理语句，管理员角色由 .env 的名单决定，页面不提供任何提权操作入口。</p>
+        </details>
+        <details>
+          <summary>2 核 2G 的机器真的跑得动吗？</summary>
+          <p>跑得动，但吞吐有限：判题并发闸门是 4，且并发参数是按实测内存算过的 —— 卡住的往往不是 CPU 而是内存。</p>
+        </details>
+        <details>
+          <summary>改了题库会怎样？</summary>
+          <p>改 <span class="mono">problems/*.json</span> 后重启即可。历史提交保存的是当时的输入/输出快照，所以改题不会让旧记录凭空少行。</p>
+        </details>
+        <details>
+          <summary>支持哪些语言？</summary>
+          <p>首版只支持 C++（g++ 12 / C++17 / -O2 -Wall）。多语言执行是明确列出的非目标。</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- ================= 收尾 CTA ================= -->
+    <section class="closing">
+      <h2>今天就刷掉一道</h2>
+      <p class="muted">注册只需要一个用户名和一个密码，不注册也能先读题。</p>
+      <div class="hero__cta hero__cta--center">
+        <a class="btn btn--lg" href="/list.html">开始刷题</a>
+        <a class="btn btn--ghost btn--lg" href="/login.html?mode=register">注册账号</a>
+      </div>
+    </section>
+
+    <footer class="landing__foot">
+      <span>CppOJ · 单机部署 · 数据不出本机</span>
+      <span class="muted">C++17 · cpp-httplib · MySQL · 无框架前端</span>
+    </footer>
+  </main>
+
+  <script type="module">
+    import { initLandingPage } from '/js/landing.js?v=20261015-5';
+    initLandingPage(document);
+  </script>
+</body>
+</html>
