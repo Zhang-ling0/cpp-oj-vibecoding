@@ -268,11 +268,58 @@ curl -s -X POST $BASE/api/auth/register -H 'Content-Type: application/json' \
 由仓库内的造数工具一条命令产出 —— 不必手工 SQL：
 
 ```bash
-make build JOBS=2                 # §0.0：2 核实测机，并发上限 2
+make build JOBS=2                 # §0.0：2 核实测机，并发上限 2（一次性编出 oj-reset）
+cd /home/ZL/project/cpp-oj-vibcoding   # 必须在项目根目录，见下方「前置条件」
+
+./build/oj-reset --dry-run        # 建议先跑：不连库、不写文件，只打印计划
+pkill -f 'build/oj'               # 建议停掉 oj：避免清库期间它往里写
 ./build/oj-reset                  # 清库 + 重建全部测试数据（约 2 秒，峰值内存 ~13MB）
-./build/oj-reset --regen-problems # 改过 tools/reset_db.cpp 的题目定义后，覆盖重写种子题文件
-./build/oj-reset --dry-run        # 只打印计划
+make run                          # 重新拉起 oj —— 不重启就读到旧题库缓存
 ```
+
+#### 前置条件（4 条，缺一条就出问题）
+
+| # | 条件 | 缺了会怎样 |
+|---|---|---|
+| 1 | **CWD = 项目根目录** | ⚠️ **换目录不会报错，只会静默退化** —— 详见下方实测 |
+| 2 | **mysqld 在跑** | `oj-reset` 自己**不拉起** mysqld，只有 `make run` 会（`Makefile:run`） |
+| 3 | **11 张表已存在** | 工具只做 `DELETE`、**不建表** —— 建表是 `./build/oj` 启动时的职责（`src/main.cpp:66`，SPEC §2.1-A）。⚠️ 所以 `db/reset.sql` 之后**不能**直接接 `oj-reset`，中间必须先起一次 `./build/oj` 把表建回来 |
+| 4 | **跑完重启 `./build/oj`** | 它持有进程内题库缓存，不重启列表页/题目页仍是旧题库。工具结束时会自己打印这句提醒 |
+
+> 「停掉 oj」是**建议不是强制** —— 工具代码里没有任何检查，文件头写一句而已。
+> 目的是别在清库的同一时刻让 oj 往里写。停不停它都能跑完。
+
+#### ⚠️ 条件 1 的实测：跑错目录是**静默退化**，不是报错
+
+`oj-reset` 默认读 `.env`，但读不到时**只用内置默认值继续跑**，不退出
+（`src/common/config.cpp:115` 的 `read_env_file`：缺 `.env` 只记 `kWarn`，
+设计意图见注释——路线 B 的 compose environment 本来就绕过这个文件）。
+
+实测（`cd /tmp && /home/.../build/oj-reset --dry-run`）：
+
+```
+[oj-reset] 配置 .env；题库目录 ./problems
+[oj-reset] --dry-run：不连库、不写任何东西。计划：清 11 张表 → …      ← exit=0，看不出任何异常
+```
+
+更麻烦的是**连警告都看不到**：`oj-reset` 从不打印 `load_config` 的 diagnostics，
+且 `init_logging()` 是在 `load_config()` **之后**才调的（`tools/reset_db.cpp:1093` 与 `:1099`），
+所以那句 `未找到配置文件 … 请确认启动时的工作目录是项目根目录` **既不在 stdout、也不在 `logs/app.log`**
+（实测 `grep -c 未找到配置文件 logs/app.log` = 0）。
+
+而内置默认值恰好是 `mysql_host=127.0.0.1` / `mysql_user=oj` / `mysql_db=oj`
+（`include/common/config.h:69,71,73`），**与本机 `.env` 相同** —— 于是它会连上正确的库、
+却把 `problems_dir` 解析成 `<错误目录>/problems`，造出一份"库对了、题库文件写错地方"的局面。
+
+> 这正是本文反复强调的那一类故障：**不是"红了"，是"没红但结果不对"**。
+> 所以跑之前先 `pwd` 确认一下，比事后查日志有用。
+
+#### 其余参数（`--help` 里有，本文原先漏了）
+
+| 参数 | 用途 |
+|---|---|
+| `--env <路径>` | 换一份配置读。默认 `.env`；跑回归想连测试库而不动开发库时用 |
+| `--problems-dir <目录>` | 覆盖题库目录。默认取 `.env` 的 `OJ_PROBLEMS_DIR`（`./problems`）；想验证种子题文件生成、又不碰正式题库目录时用 |
 
 造出来的东西与本文档的对应关系：
 
@@ -285,9 +332,13 @@ make build JOBS=2                 # §0.0：2 核实测机，并发上限 2
 | 4 题收藏 + 6 题进度行 | `WT-LS-21`、`WT-PB-09` |
 | 进度三态样本：`two-sum`（已通过）/ `rotate-left`（只有 CE → 尝试过）/ 5 道从未提交的题 | `WT-LS-20` |
 
-> ⚠️ **两点必须知道**：
+> ⚠️ **三点必须知道**：
 > ① 执行后**要重启 `./build/oj`**（它持有进程内题库缓存）；
-> ② 两条 `pending` 行在 **judge 接线后**会被 D-20 重新入队判掉，判题类回归前请重跑一次本工具。
+> ② 两条 `pending` 行在 **judge 接线后**会被 D-20 重新入队判掉，判题类回归前请重跑一次本工具；
+> ③ **`--regen-problems` 不是可有可无的**：默认行为是**已存在的种子题文件一律不覆盖**
+>    （`reset_db.cpp:1136-1142`，设计意图是「真人在录的题不该被造数工具改掉」）。
+>    所以改了 `tools/reset_db.cpp:217-268` 的 `kSeeds`（题目/难度/标签）之后，
+>    **不加这个参数，你改的是代码、跑出来还是旧题库** —— 而且不报错，看不出来。
 >
 > `tests/run_problemsync_test.sh` 原先写死"题库里只有 1 道题"的 4 条计数断言已改成
 > 基线相对（题库多大都能跑），因此两套造数互不打架。
@@ -1904,8 +1955,10 @@ bash tests/run_problemsync_test.sh      # 期望 通过 30，失败 0
 # ── 2. 轮前重置（R5：把基线按构造恢复）──────────────────
 #    只在「要跑依赖绝对数字的用例」时需要；日常增量回归可跳过，
 #    代价是 WT-LS-01/04、WT-IN-03、WT-MG-01/02/04 这批用 baseline 断言，风险自担。
-./build/oj-reset                       # ≈2s；随后必须重启 ./build/oj（持有进程内题库缓存）
-sudo systemctl restart oj              # 或你实际的启动方式
+#    前置条件见 §2.4：CWD 必须是项目根目录、mysqld 在跑、11 张表已存在。
+pkill -f 'build/oj' ; ./build/oj-reset      # ≈2s（停 oj → 清库造数）
+make run                               # 重启 oj：它持有进程内题库缓存，不重启读到旧题库
+                                       # （本机实测：oj 未装 systemd unit，用 make run）
 
 # ── 3. 前端回归（本文档）───────────────────────────────
 cd tests/web && npm install
