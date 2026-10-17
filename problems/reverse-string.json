@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "args": [
+        "a man a plan"
+      ],
+      "brief": "基础用例",
+      "expected": "nalp a nam a"
+    },
+    {
+      "args": [
+        "hello"
+      ],
+      "brief": "含负数与零",
+      "expected": "olleh"
+    },
+    {
+      "args": [
+        "level"
+      ],
+      "brief": "较大数值或长输入",
+      "expected": "level"
+    }
+  ],
+  "code_template": "#include <string>\nusing namespace std;\n\nclass Solution {\npublic:\n    std::string reverseString(vector<string>& s) {\n        \n    }\n};",
+  "difficulty": "easy",
+  "harness_prelude": "",
+  "hint_md": "先把签名抄准，再从最小输入（空/单元素）推演一遍；注意返回值类型与边界值。",
+  "is_featured": false,
+  "mem_limit_kb": 131072,
+  "method_name": "reverseString",
+  "params": [
+    {
+      "cpp_type": "std::string",
+      "name": "s"
+    }
+  ],
+  "return_type": "std::string",
+  "signature": "class Solution {\npublic:\n    std::string reverseString(std::string);\n};",
+  "slug": "reverse-string",
+  "sort_no": 114,
+  "statement_md": "## 题目描述\n\n给定一个字符串 `s`，返回它的逆序字符串。\n\n### 示例\n\n```\n输入: s=\"a man a plan\"\n输出: \"nalp a nam a\"\n```\n\n### 约束\n\n- 参数与返回值类型以签名 为准，不要改动\n- 用例规模见题面示例，判题时限 3000ms\n",
+  "tags": {
+    "algorithm": [
+      "字符串",
+      "双指针"
+    ],
+    "source": [
+      "基础练习"
+    ]
+  },
+  "time_limit_ms": 3000,
+  "title": "反转字符串"
+}

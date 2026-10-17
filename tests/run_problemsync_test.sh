@@ -204,12 +204,17 @@ echo "探针：${PROBE_FILE}（slug=${PROBE_SLUG}）  实例：${PROBE_BASE}"
 echo
 command -v jq >/dev/null || { echo "需要 jq"; exit 1; }
 
-# ---- 0. 基线：只有 two-sum --------------------------------------------------------
-say "[0] 基线（题库里只有 two-sum）"
+# ---- 0. 基线：先记住当前题库有几道题 ------------------------------------------------
+# 【为什么是"记住基线"而不是断言 1】本套件验的是"增/改/写坏/删"这四个动作对库做了什么，
+#   与题库里【本来】有几道题无关。而 tools/reset_db.cpp（web 自动化测试的数据底座）会给
+#   题库补到 20+ 道 —— 写死 1 会让本套件在造过数之后必然红 4 条，而那 4 条与它要验的语义
+#   毫无关系。于是这里取基线、后面全部按"基线 + N"断言：题库多大都能跑。
+say "[0] 基线（记下当前题库总数）"
 rm -f "${PROBE_FILE}"
 start_probe_server || exit 1
 curl -sS "${PROBE_BASE}/api/problems" -o "${body_file}"
-check_eq "列表 total（基线，应为 1）" "$(jq -r '.data.total' "${body_file}")" "1"
+BASE_TOTAL="$(jq -r '.data.total' "${body_file}")"
+check_eq "列表 total（基线 = ${BASE_TOTAL} 道题）" "${BASE_TOTAL}" "${BASE_TOTAL}"
 check_http "two-sum 详情可读" GET /api/problems/two-sum 200 0
 
 # ---- 1. 增 -------------------------------------------------------------------------
@@ -217,7 +222,7 @@ say "[1] 增：新增 problems/${PROBE_SLUG}.json → 重启"
 probe_json_v1 > "${PROBE_FILE}"
 start_probe_server || exit 1
 curl -sS "${PROBE_BASE}/api/problems" -o "${body_file}"
-check_eq "列表 total（应为 2）" "$(jq -r '.data.total' "${body_file}")" "2"
+check_eq "列表 total（应为基线+1 = $((BASE_TOTAL + 1))）" "$(jq -r '.data.total' "${body_file}")" "$((BASE_TOTAL + 1))"
 check_http "新题详情 → 200/0" GET "/api/problems/${PROBE_SLUG}" 200 0
 check_eq "新题 title" "$(detail_field "${PROBE_SLUG}" title)" "探针题·初版"
 check_eq "新题 difficulty" "$(detail_field "${PROBE_SLUG}" difficulty)" "easy"
@@ -283,14 +288,14 @@ printf '        删 problems 行会 CASCADE 掉所有用户在该题上的提交
 printf '        代价是"删了文件的题仍出现在列表页"，这与【改坏】的处置不同，两者别混为一谈。\n'
 
 # ---- 5. 收尾：先证明"行确实留在库里"，再显式删行 → 回到基线 ------------------------
-say "[5] 收尾：显式删掉库里的探针行 → 重启（题库回到只剩 two-sum）"
+say "[5] 收尾：显式删掉库里的探针行 → 重启（题库回到基线）"
 curl -sS "${PROBE_BASE}/api/problems" -o "${body_file}"
-check_eq "删文件后 total 仍是 2（行没被删）" "$(jq -r '.data.total' "${body_file}")" "2"
+check_eq "删文件后 total 仍是基线+1（行没被删）" "$(jq -r '.data.total' "${body_file}")" "$((BASE_TOTAL + 1))"
 "${MYSQL[@]}" "DELETE FROM submissions WHERE problem_id IN (SELECT id FROM problems WHERE slug='${PROBE_SLUG}');
                DELETE FROM problems WHERE slug='${PROBE_SLUG}';" >/dev/null 2>&1
 start_probe_server || exit 1
 curl -sS "${PROBE_BASE}/api/problems" -o "${body_file}"
-check_eq "显式删行后 total 回到 1" "$(jq -r '.data.total' "${body_file}")" "1"
+check_eq "显式删行后 total 回到基线 ${BASE_TOTAL}" "$(jq -r '.data.total' "${body_file}")" "${BASE_TOTAL}"
 check_http "two-sum 仍然可读" GET /api/problems/two-sum 200 0
 
 echo

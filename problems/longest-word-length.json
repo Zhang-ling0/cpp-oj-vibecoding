@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "args": [
+        "Cpp OJ"
+      ],
+      "brief": "基础用例",
+      "expected": 3
+    },
+    {
+      "args": [
+        "a man a plan"
+      ],
+      "brief": "含负数与零",
+      "expected": 4
+    },
+    {
+      "args": [
+        "hello"
+      ],
+      "brief": "较大数值或长输入",
+      "expected": 5
+    }
+  ],
+  "code_template": "#include <string>\nusing namespace std;\n\nclass Solution {\npublic:\n    int longestWordLength(vector<string>& s) {\n        \n    }\n};",
+  "difficulty": "hard",
+  "harness_prelude": "",
+  "hint_md": "先把签名抄准，再从最小输入（空/单元素）推演一遍；注意返回值类型与边界值。",
+  "is_featured": false,
+  "mem_limit_kb": 131072,
+  "method_name": "longestWordLength",
+  "params": [
+    {
+      "cpp_type": "std::string",
+      "name": "s"
+    }
+  ],
+  "return_type": "int",
+  "signature": "class Solution {\npublic:\n    int longestWordLength(std::string);\n};",
+  "slug": "longest-word-length",
+  "sort_no": 118,
+  "statement_md": "## 题目描述\n\n给定一个用空格分隔的字符串 `s`，返回其中最长单词的字符个数。\n\n### 示例\n\n```\n输入: s=\"Cpp OJ\"\n输出: 3\n```\n\n### 约束\n\n- 参数与返回值类型以签名 为准，不要改动\n- 用例规模见题面示例，判题时限 3000ms\n",
+  "tags": {
+    "algorithm": [
+      "字符串",
+      "模拟"
+    ],
+    "source": [
+      "外企面经"
+    ]
+  },
+  "time_limit_ms": 3000,
+  "title": "最长单词长度"
+}

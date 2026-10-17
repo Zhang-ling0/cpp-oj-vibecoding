@@ -1,0 +1,70 @@
+{
+  "cases": [
+    {
+      "args": [
+        [
+          42,
+          7,
+          13
+        ]
+      ],
+      "brief": "基础用例",
+      "expected": 3
+    },
+    {
+      "args": [
+        [
+          4,
+          4,
+          9,
+          9,
+          2
+        ]
+      ],
+      "brief": "含负数与零",
+      "expected": 3
+    },
+    {
+      "args": [
+        [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      ],
+      "brief": "较大数值或长输入",
+      "expected": 5
+    }
+  ],
+  "code_template": "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n    int countDistinct(vector<int>& nums) {\n        \n    }\n};",
+  "difficulty": "medium",
+  "harness_prelude": "",
+  "hint_md": "先把签名抄准，再从最小输入（空/单元素）推演一遍；注意返回值类型与边界值。",
+  "is_featured": false,
+  "mem_limit_kb": 131072,
+  "method_name": "countDistinct",
+  "params": [
+    {
+      "cpp_type": "std::vector<int>&",
+      "name": "nums"
+    }
+  ],
+  "return_type": "int",
+  "signature": "class Solution {\npublic:\n    int countDistinct(std::vector<int>&);\n};",
+  "slug": "count-distinct",
+  "sort_no": 112,
+  "statement_md": "## 题目描述\n\n给定一个整数数组 `nums`，返回其中不同整数的个数。\n\n### 示例\n\n```\n输入: nums=[42,7,13]\n输出: 3\n```\n\n### 约束\n\n- 参数与返回值类型以签名 为准，不要改动\n- 用例规模见题面示例，判题时限 3000ms\n",
+  "tags": {
+    "algorithm": [
+      "数组",
+      "哈希表"
+    ],
+    "source": [
+      "高频面试题"
+    ]
+  },
+  "time_limit_ms": 3000,
+  "title": "不同元素个数"
+}

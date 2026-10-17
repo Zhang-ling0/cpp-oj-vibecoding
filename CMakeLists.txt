@@ -171,6 +171,14 @@ endif()
 add_executable(oj src/main.cpp)
 target_link_libraries(oj PRIVATE ojcore)
 
+# ---- 数据库重置 + 造数工具（web 自动化测试的数据底座）-------------------------
+# 与 oj 共用 ojcore 是刻意的：连接池、配置、bcrypt、题库加载器、事务全部复用，
+# 造数因此走的是【与正式启动完全相同的代码路径】（题库经 load_all 的 D-64 校验入库），
+# 不存在"脚本里另写一份 SQL 而与源码漂移"的可能。详见 tools/reset_db.cpp 文件头。
+# 它是单进程的顺序执行工具：不 spawn 线程、不调 g++，因此在 2 核 / 1967MB 上是秒级的。
+add_executable(oj-reset tools/reset_db.cpp)
+target_link_libraries(oj-reset PRIVATE ojcore)
+
 # ---- 测试 ----------------------------------------------------------------------
 option(OJ_BUILD_TESTS "构建 gtest 单元测试" ON)
 if(OJ_BUILD_TESTS)
