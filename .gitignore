@@ -16,7 +16,9 @@ logs/*.log.*
 /compile_commands.json
 .cache/
 .opencode/
-
+*.yml
+console-*
+page-*
 
 # .env 是本地配置，本项目的密码是开发用的明文默认值（dependence.md §4），
 # 若将来换成真实口令，请取消下一行注释
