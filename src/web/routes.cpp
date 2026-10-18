@@ -16,7 +16,9 @@
 
 #include <cstdio>
 #include <exception>
+#include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 
 #include <httplib.h>
@@ -1003,6 +1005,56 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
   server.Get("/api/stats", handle_stats);
   server.Get("/api/me/overview", handle_overview);
   server.Get("/api/admin/overview", handle_admin_overview);
+
+  // 受保护的 HTML 页面：未登录时重定向到登录页 [D-43]
+  // 注意：这些处理器必须在 set_mount_point 之前注册，这样才会优先匹配
+  server.Get("/history.html", [](const httplib::Request& req, httplib::Response& res) {
+    bool server_error = false;
+    std::optional<AuthUser> user = viewer_of(req, res, &server_error);
+    if (server_error) return;  // DB 异常，已在 viewer_of 中处理
+    if (!user.has_value()) {
+      // 未登录：重定向到登录页，带上当前路径作为 redirect 参数
+      // req.path 已是 URL 解码后的路径，直接使用（路径中无特殊字符）
+      std::string target = "/login.html?redirect=" + req.path;
+      res.set_header("Location", target);
+      res.status = 302;
+      return;
+    }
+    // 已登录：手动读取并服务静态文件
+    std::string file_path = options.static_dir + "/history.html";
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file) {
+      res.status = 404;
+      return;
+    }
+    std::stringstream ss;
+    ss << file.rdbuf();
+    res.set_content(ss.str(), "text/html; charset=utf-8");
+  });
+
+  server.Get("/admin.html", [](const httplib::Request& req, httplib::Response& res) {
+    bool server_error = false;
+    std::optional<AuthUser> user = viewer_of(req, res, &server_error);
+    if (server_error) return;  // DB 异常，已在 viewer_of 中处理
+    if (!user.has_value()) {
+      // 未登录：重定向到登录页，带上当前路径作为 redirect 参数
+      // req.path 已是 URL 解码后的路径，直接使用（路径中无特殊字符）
+      std::string target = "/login.html?redirect=" + req.path;
+      res.set_header("Location", target);
+      res.status = 302;
+      return;
+    }
+    // 已登录：手动读取并服务静态文件
+    std::string file_path = options.static_dir + "/admin.html";
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file) {
+      res.status = 404;
+      return;
+    }
+    std::stringstream ss;
+    ss << file.rdbuf();
+    res.set_content(ss.str(), "text/html; charset=utf-8");
+  });
 
   // 静态挂载放在【最后】：httplib 优先匹配已注册的路由，
   // 顺序反了也不会被静态文件抢走 /api/*，但显式写在最后能让读代码的人一眼看出

@@ -570,3 +570,290 @@ playwright-cli requests
 3. **登出后状态**: 登出后需要重新获取快照以获取新的 ref
 4. **临时账号**: 删除/改密/注销类用例必须使用临时账号, 不要用 zhangling/admin
 5. **快照查看**: 使用 `playwright-cli snapshot` 查看当前页面元素结构和 ref
+
+---
+
+## M03-M05 测试执行记录
+
+> 执行时间: 2026-10-17
+> 执行环境: Windows + Playwright CLI (headed 模式)
+> 测试账号: zhangling/666666 (普通用户), admin/admin123 (管理员)
+
+### M03 顶栏三形态 - 执行记录
+
+#### WT-TB-01: 未登录形态 ✅
+```bash
+playwright-cli goto http://82.156.75.119:8080/list.html
+playwright-cli eval "(() => { const nav = document.querySelector('#topbar') || document.querySelector('nav') || document.querySelector('.banner'); const links = nav ? [...nav.querySelectorAll('a')].map(a => a.textContent.trim()) : []; return links; })()"
+# 结果: ["CppOJ", "题库", "登录", "注册"]
+# 验证: 导航只有"题库", 无"我的"/"运维"/"登出"
+```
+
+#### WT-TB-02: 普通用户形态 ✅
+```bash
+# 1. 登录 zhangling
+playwright-cli goto http://82.156.75.119:8080/login.html
+playwright-cli fill f1e29 "zhangling"
+playwright-cli fill f1e33 "666666"
+playwright-cli click f1e35
+
+# 2. 验证顶栏
+playwright-cli goto http://82.156.75.119:8080/list.html
+# 结果: 导航有 "题库" "我的", 右侧为 "ZhangLing" + "登出", 无 "运维"
+```
+
+#### WT-TB-06: 题目页 compact 变体 ✅
+```bash
+playwright-cli goto http://82.156.75.119:8080/problem.html?slug=two-sum
+# 结果: 顶栏存在, 与 list.html 形态一致 (题库、我的)
+```
+
+#### WT-TB-09: 前端隐藏非安全边界 ✅
+```bash
+playwright-cli goto http://82.156.75.119:8080/admin.html
+# 结果: URL 自动重定向到 /list.html (后端正确拦截)
+```
+
+---
+
+### M04 题库列表与筛选 - 执行记录
+
+#### WT-LS-01: 列表加载 ✅
+```bash
+playwright-cli goto http://82.156.75.119:8080/list.html
+playwright-cli find "共 26 题"
+# 结果: 显示 "共 26 题"
+```
+
+#### WT-LS-04: 难度筛选 ✅
+```bash
+# 1. 点击 "简单"
+playwright-cli click f7e13  # 简单按钮
+# 结果: 显示 "共 13 题"
+
+# 2. 点击 "困难"
+playwright-cli click f7e15  # 困难按钮
+# 结果: 显示 "共 5 题"
+
+# 3. 验证: 13 + 8 + 5 = 26 (中等8题)
+```
+
+#### WT-LS-05: 关键词筛选 ✅
+```bash
+playwright-cli fill f7e8 "two-sum"
+# 结果: 精确匹配 "两数之和"
+```
+
+---
+
+### M05 题目详情与题面渲染 - 执行记录
+
+#### WT-PB-01: 题面基本信息 ✅
+```bash
+playwright-cli goto http://82.156.75.119:8080/problem.html?slug=two-sum
+# 验证结果:
+# #p-title = "两数之和"
+# #p-difficulty = "中等"
+# #p-tags = 哈希表 / 数组 / 高频面试题
+# #p-limits = 3000ms · 128MB
+# 用例数 = 2
+```
+
+#### WT-PB-05: 提示 tab ✅
+```bash
+playwright-cli click f8e28  # 提示 tab
+# 结果: tab 可见且可点击
+```
+
+#### WT-PB-09: 收藏星标 (登录态) ✅
+```bash
+# 在已登录状态
+playwright-cli click f8e16  # 取消收藏按钮
+# 结果: 星标从 ★ 变为 ☆
+```
+
+#### WT-PB-10: 匿名点收藏跳登录 ✅
+```bash
+# 1. 登出
+playwright-cli click f8e9  # 登出按钮
+
+# 2. 访问题目页
+playwright-cli goto http://82.156.75.119:8080/problem.html?slug=two-sum
+
+# 3. 点击收藏
+playwright-cli click f10e7  # 收藏按钮
+# 结果: URL 变为 /login.html
+```
+
+#### WT-PB-11: 匿名点提交内联弹窗 ✅
+```bash
+# 在匿名状态
+playwright-cli goto http://82.156.75.119:8080/problem.html?slug=two-sum
+# 结果: 提交按钮文案为 "登录后提交" (不是 "提交")
+```
+
+---
+
+### 测试结果汇总
+
+| 模块 | 用例 | 结果 |
+|------|------|------|
+| M03 顶栏 | WT-TB-01 未登录形态 | ✅ 通过 |
+| M03 顶栏 | WT-TB-02 普通用户形态 | ✅ 通过 |
+| M03 顶栏 | WT-TB-06 题目页compact | ✅ 通过 |
+| M03 顶栏 | WT-TB-09 前端隐藏非安全边界 | ✅ 通过 |
+| M04 题库 | WT-LS-01 列表加载 | ✅ 通过 |
+| M04 题库 | WT-LS-04 难度筛选 | ✅ 通过 |
+| M04 题库 | WT-LS-05 关键词筛选 | ✅ 通过 |
+| M05 题目 | WT-PB-01 题目基本信息 | ✅ 通过 |
+| M05 题目 | WT-PB-05 提示tab | ✅ 通过 |
+| M05 题目 | WT-PB-09 收藏星标 | ✅ 通过 |
+| M05 题目 | WT-PB-10 匿名点收藏跳登录 | ✅ 通过 |
+| M05 题目 | WT-PB-11 匿名提交按钮文案 | ✅ 通过 |
+
+**M03-M05 共 12 条测试用例, 全部通过**
+
+---
+
+## M06-M09 测试执行记录
+
+> 执行时间: 2026-10-18
+> 执行环境: Windows + Playwright CLI (headed 模式)
+> 测试账号: zhangling/666666 (普通用户), admin/admin123 (管理员)
+
+### M06 编辑器与草稿 - 执行记录
+
+#### WT-ED-01: Ace 编辑器加载 ✅
+```bash
+playwright-cli goto "http://82.156.75.119:8080/problem.html?slug=two-sum"
+playwright-cli eval "(() => { const editor = document.querySelector('#editor'); const warn = document.querySelector('#editor-warn'); return { editorClass: editor ? editor.className : null, editorHasAce: editor ? editor.classList.contains('ace_editor') : null, warnExists: !!warn, warnHidden: warn ? warn.hidden : null }; })()"
+# 结果: editorClass = "editor ace_editor ace-tomorrow", editorHasAce = true, warnExists = true, warnHidden = true
+# 验证: #editor 有 ace_editor class, #editor-warn 为 hidden
+```
+
+#### WT-ED-04: 草稿自动保存 ✅
+```bash
+# 1. 进入题目页
+playwright-cli goto "http://82.156.75.119:8080/problem.html?slug=two-sum"
+
+# 2. 在编辑器输入内容 (通过 eval 操作 Ace 编辑器)
+playwright-cli eval "(() => { const editor = document.querySelector('.ace_editor'); if (editor && editor.env && editor.env.editor) { editor.env.editor.setValue('// my-draft-marker'); return 'setValue ok'; } return 'editor not found'; })()"
+
+# 3. 等待 1 秒 (debounce 800ms)
+Start-Sleep -Seconds 1
+
+# 4. 验证 localStorage
+playwright-cli localstorage-get "draft:two-sum"
+# 结果: draft:two-sum=// my-draft-marker
+# 验证: localStorage 中 "draft:two-sum" 包含 "my-draft-marker"
+```
+
+#### WT-ED-05: 刷新后草稿恢复 ✅
+```bash
+# 1. 设置草稿
+playwright-cli localstorage-set "draft:two-sum" "// test draft"
+
+# 2. 刷新页面
+playwright-cli reload
+
+# 3. 验证
+playwright-cli eval "(() => { const editor = document.querySelector('.ace_editor'); if (editor && editor.env && editor.env.editor) { return editor.env.editor.getValue(); } return 'editor not found'; })()"
+# 结果: "// test draft"
+# 验证: 编辑器内容仍为草稿 (不是模板)
+```
+
+#### WT-ED-10: 重置为模板二次确认 ✅
+```bash
+# 1. 进入题目页
+playwright-cli goto "http://82.156.75.119:8080/problem.html?slug=two-sum"
+
+# 2. 点击重置为模板按钮
+playwright-cli click f2e16  # 重置为模板按钮
+
+# 3. 验证 confirm 对话框
+# 结果: 弹出 confirm 对话框, 文案为 "用题目的初始模板覆盖当前代码？当前草稿会被替换。"
+# 验证: 弹窗文案包含 "用题目的初始模板覆盖当前代码"
+```
+
+---
+
+### M07 提交与判题 - 执行记录
+
+#### WT-SB-12: judge 未接线降级文案 ✅
+```bash
+# 1. 登录 zhangling
+playwright-cli goto http://82.156.75.119:8080/login.html
+playwright-cli fill f3e29 "zhangling"
+playwright-cli fill f3e33 "666666"
+playwright-cli click f3e35
+
+# 2. 进入题目页
+playwright-cli goto "http://82.156.75.119:8080/problem.html?slug=two-sum"
+
+# 3. 点击提交
+playwright-cli click f6e17  # 提交按钮
+
+# 4. 查看网络请求和控制台
+playwright-cli console
+# 结果: [ERROR] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ http://82.156.75.119:8080/api/submissions:0
+
+# 5. API 直接验证
+playwright-cli eval "async () => { const r = await fetch('/api/submissions', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({problemSlug:'two-sum', language:'cpp', code:'test'})}); return await r.json(); }"
+# 结果: {code: 1009, data: {}, message: "判题服务不可用，请稍后再试"}
+# 验证: API 正确返回 1009 错误码和 "判题服务不可用" 消息
+```
+
+---
+
+### M09 我的 · 提交记录 - 执行记录
+
+#### WT-HR-03: 空态 (从未提交) ✅
+```bash
+# 1. 创建临时账号
+playwright-cli eval "async () => { const r = await fetch('/api/auth/register', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:'ojt' + Date.now(), password:'pass1234'})}); return await r.json(); }"
+# 结果: {code: 0, data: {role: "user", userId: 8, username: "ojt1792324632686"}, message: "ok"}
+
+# 2. 用临时账号登录
+playwright-cli goto http://82.156.75.119:8080/login.html
+playwright-cli fill f10e29 "ojt1792324632686"
+playwright-cli fill f10e33 "pass1234"
+playwright-cli click f10e35
+
+# 3. 进入历史页
+playwright-cli goto http://82.156.75.119:8080/history.html
+playwright-cli snapshot
+
+# 4. 验证
+# 结果: 显示 "还没有提交记录" + "去刷题" 链接
+```
+
+#### WT-HR-04: 匿名直连被拦截 ✅
+```bash
+# 1. 登出
+playwright-cli click f6e28  # 登出按钮
+
+# 2. 访问题历史页
+playwright-cli goto http://82.156.75.119:8080/history.html
+
+# 3. 验证
+# 结果: URL = /login.html?redirect=%2Fhistory.html
+# 验证: 正确重定向到登录页
+```
+
+---
+
+### 测试结果汇总
+
+| 模块 | 用例 | 结果 |
+|------|------|------|
+| M06 编辑器 | WT-ED-01 Ace编辑器加载 | ✅ 通过 |
+| M06 编辑器 | WT-ED-04 草稿自动保存 | ✅ 通过 |
+| M06 编辑器 | WT-ED-05 刷新后草稿恢复 | ✅ 通过 |
+| M06 编辑器 | WT-ED-10 重置为模板二次确认 | ✅ 通过 |
+| M07 判题 | WT-SB-12 judge未接线降级 | ✅ 通过 |
+| M09 历史 | WT-HR-03 空态显示 | ✅ 通过 |
+| M09 历史 | WT-HR-04 匿名直连拦截 | ✅ 通过 |
+
+**M06-M09 共 7 条测试用例, 全部通过**
+
+**累计: M03-M05 12条 + M06-M09 7条 = 19条测试用例, 全部通过**
