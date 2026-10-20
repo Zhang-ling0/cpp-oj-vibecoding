@@ -857,3 +857,165 @@ playwright-cli goto http://82.156.75.119:8080/history.html
 **M06-M09 共 7 条测试用例, 全部通过**
 
 **累计: M03-M05 12条 + M06-M09 7条 = 19条测试用例, 全部通过**
+
+---
+
+## M10-M12 测试执行记录
+
+> 执行时间: 2026-10-19
+> 执行环境: Windows + Playwright CLI (headed 模式)
+> 测试账号: zhangling/666666 (普通用户), admin/admin123 (管理员)
+
+### M10 我的 · 掌握分布 - 执行记录
+
+#### WT-MG-01: 难度卡三档 ✅
+```bash
+# 1. 登录 zhangling
+playwright-cli goto http://82.156.75.119:8080/login.html
+playwright-cli fill f1e29 "zhangling"
+playwright-cli fill f1e33 "666666"
+playwright-cli click f1e35
+
+# 2. 进入"我的"页面
+playwright-cli click f2e6  # 我的链接
+
+# 3. 点击"掌握分布" tab
+playwright-cli click f3e17  # 掌握分布 tab
+
+# 4. 验证难度卡
+playwright-cli snapshot
+# 结果: 三档难度卡齐全
+# 简单: 5/13, 通过率 38%
+# 中等: 5/8, 通过率 63%
+# 困难: 2/5, 通过率 40%
+```
+
+#### WT-MG-04: 标签表四列 ✅
+```bash
+# 在掌握分布页面
+playwright-cli snapshot
+# 结果: 标签表四列: 标签 / 已过 / 总数 / 通过率
+# 按 total 降序排列: 数组(20) > 字符串(6) > 双指针(3) > ...
+```
+
+#### WT-MG-06: 总数自洽 ✅
+```bash
+# 验证: 简单13 + 中等8 + 困难5 = 26 题 (与题库总数一致)
+```
+
+#### WT-MG-07: 标签倒序 ✅
+```bash
+# 验证: 标签按 total 降序排列
+# 数组 20 > 字符串 6 > 双指针 3 > ...
+```
+
+#### WT-MG-08: 来源标签折叠 ✅
+```bash
+# 验证: "展开来源标签（3）" 可见
+# 点击后显示高频面试题等来源标签
+```
+
+---
+
+### M11 我的 · 账户设置 - 执行记录
+
+#### WT-AC-01: 账户信息只读 ✅
+```bash
+# 1. 登录 zhangling
+# ... 登录流程
+
+# 2. 点击"账户设置" tab
+playwright-cli click f3e18  # 账户设置 tab
+
+# 3. 验证
+playwright-cli snapshot
+# 结果:
+# 用户名: ZhangLing
+# 角色: 普通用户
+# 无修改用户名的输入框
+```
+
+#### WT-AC-02: 普通用户不显示角色标签 ✅
+```bash
+# 验证: 顶栏只显示 "ZhangLing", 无 "普通用户" 或角色徽标
+# 账户设置页显示 "角色: 普通用户", 但顶栏不显示
+```
+
+#### WT-AC-09: 登出当前账号 ✅
+```bash
+# 验证: "登出当前账号" 按钮存在
+# 点击后跳转到 /login.html
+```
+
+---
+
+### M12 运维概览 - 执行记录
+
+#### WT-AD-01: admin 可访问 ✅
+```bash
+# 1. 登录 admin
+playwright-cli goto http://82.156.75.119:8080/login.html
+playwright-cli fill f1e29 "admin"
+playwright-cli fill f1e33 "admin123"
+playwright-cli click f1e35
+
+# 2. 进入运维页面
+playwright-cli goto http://82.156.75.119:8080/admin.html
+
+# 3. 验证
+playwright-cli snapshot
+# 结果: 运维概览页面正常显示
+# 顶栏显示 "admin" + "管理员" 徽标
+```
+
+#### WT-AD-02: 系统状态四项 ✅
+```bash
+# 验证: 系统状态卡显示四项
+# 用户: 8 (含管理员1)
+# 题目: 26, 用例 77
+# 提交: 40, AC 21 · 失败 2
+# 未完成提交: 2 (pending / judging)
+```
+
+#### WT-AD-03: judge 未接线如实回显 ✅
+```bash
+# 验证: 判题调度器显示 "未接线" pill--warn
+# #sys-note 显示解释段落
+```
+
+#### WT-AD-04: 用户清单列齐全 ✅
+```bash
+# 验证: table.admin-users 表头 11 列
+# 共 8 人, admin 零提交
+# alice01/erin05 零提交用户通过率显示 "—"
+```
+
+#### WT-AD-08: 严格只读 ✅
+```bash
+# 验证: 页面上无任何 <form>, 无写操作按钮
+# Network 只有 GET /api/admin/overview 请求
+```
+
+---
+
+### 测试结果汇总
+
+| 模块 | 用例 | 结果 |
+|------|------|------|
+| M10 掌握 | WT-MG-01 难度卡三档 | ✅ 通过 |
+| M10 掌握 | WT-MG-04 标签表四列 | ✅ 通过 |
+| M10 掌握 | WT-MG-06 总数自洽 | ✅ 通过 |
+| M10 掌握 | WT-MG-07 标签倒序 | ✅ 通过 |
+| M10 掌握 | WT-MG-08 来源标签折叠 | ✅ 通过 |
+| M11 账户 | WT-AC-01 账户信息只读 | ✅ 通过 |
+| M11 账户 | WT-AC-02 普通用户不显示角色标签 | ✅ 通过 |
+| M11 账户 | WT-AC-09 登出当前账号 | ✅ 通过 |
+| M12 运维 | WT-AD-01 admin 可访问 | ✅ 通过 |
+| M12 运维 | WT-AD-02 系统状态四项 | ✅ 通过 |
+| M12 运维 | WT-AD-03 judge 未接线回显 | ✅ 通过 |
+| M12 运维 | WT-AD-04 用户清单列齐全 | ✅ 通过 |
+| M12 运维 | WT-AD-08 严格只读 | ✅ 通过 |
+
+**M10-M12 共 13 条测试用例, 全部通过**
+
+**累计: M03-M05 12条 + M06-M09 7条 + M10-M12 13条 = 32条测试用例, 全部通过**
