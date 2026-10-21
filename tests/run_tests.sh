@@ -83,6 +83,19 @@ static() {
 field_of() { jq -r '.data.field // "-"' "${TMP}/body" 2>/dev/null; }
 data_key() { jq -r "try ($1) | if . == null then \"-\" else tostring end" "${TMP}/body" 2>/dev/null; }
 
+# expect_eq <标签> <实际> <期望> —— 用于 HTTP 之外的判据（SQL 计数、文件是否存在）。
+# 与 report 同一套 PASS/FAIL 计数与配色：一个脚本里出现两种"算通过"的口径迟早会漏判。
+expect_eq() {
+  local label="$1" got="$2" want="$3"
+  if [[ "${got}" == "${want}" ]]; then
+    PASS=$((PASS + 1))
+    printf '  \033[32mPASS\033[0m %-58s → %s\n' "${label}" "${got}"
+  else
+    FAIL=$((FAIL + 1))
+    printf '  \033[31mFAIL\033[0m %-58s → %s（期望 %s）\n' "${label}" "${got}" "${want}"
+  fi
+}
+
 echo "=== CppOJ 端到端验收（curl）==="
 echo "服务：${BASE}"
 echo
@@ -202,23 +215,28 @@ BIG_CODE="$(head -c 70000 /dev/zero | tr '\0' 'a')"
 api "代码超 64KB → 400/1001 field=code" POST /api/submissions 400 1001 \
   -b "${jar_a}" -H 'Content-Type: application/json' \
   -d "$(jq -nc --arg s "${SLUG}" --arg c "${BIG_CODE}" '{problemSlug:$s, code:$c}')"
-# judge 调度器（T2.7）尚未接线：契约规定此时回 1009 且【不落库】
-api "判题器未接线 → 503/1009" POST /api/submissions 503 1009 \
+# judge 已接线（阶段 1）：校验 + 1002 + 1006 + 1007 闸门都过了才建行 → 201
+# （阶段 2 新增的两道闸在本脚本的这条用例里都取不到：用户是当次新建的，窗口内 0 次、并发 0 条）
+api "提交成功（judge 已接线）→ 201/0" POST /api/submissions 201 0 \
   -b "${jar_a}" -H 'Content-Type: application/json' -d "${BODY_TWO_SUM}"
+printf '        submissionId=%s queueAhead=%s\n' \
+  "$(data_key '.data.submissionId')" "$(data_key '.data.queueAhead')"
 
 # ---------------------------------------------------------------- 12/13/14/15/16 提交读侧
-# judge 未接线 ⇒ 库里没有真实提交。这几条用例【用 SQL 造出 judge 会写回的那种行】
-# （这是判题侧的唯一产出方式），再从 HTTP 侧验归属校验、分页、diff、删除、重跑。
+# 这几条要验的是【固定形状】的行（WA + 用例明细 / AC / failed-JE），仍由 SQL 直接造：
+# [11] 的真实提交由真判产出，结论随代码与机器负载变化，不能拿来断言字段值。
 echo
 echo "[12] GET /api/submissions/{id}"
 sql "INSERT INTO submissions (user_id, problem_id, language, code, status, verdict, message, case_passed, case_total, total_ms, max_mem_kb, created_at, finished_at)
      SELECT ${ID_A}, id, 'cpp', 'class Solution { /* v1 */ };', 'done', 'WA', '第 1 个用例答案错误', 0, 2, 41, 3072, UTC_TIMESTAMP(), UTC_TIMESTAMP()
      FROM problems ORDER BY id LIMIT 1;" >/dev/null
-SUB1="$(sql "SELECT id FROM submissions WHERE user_id=${ID_A} ORDER BY id LIMIT 1;")"
+# 按 message 精确选行（而不是 ORDER BY id LIMIT 1）：[11] 的真实提交 id 更小，
+# 按 id 排会把那条真判出来的记录误当成这条 WA 合成行（详情断言会全部错位）
+SUB1="$(sql "SELECT id FROM submissions WHERE user_id=${ID_A} AND message='第 1 个用例答案错误' ORDER BY id DESC LIMIT 1;")"
 sql "INSERT INTO submissions (user_id, problem_id, language, code, status, verdict, message, case_passed, case_total, total_ms, max_mem_kb, created_at, finished_at)
      SELECT ${ID_A}, id, 'cpp', 'class Solution { /* v2 修好了 */ };', 'done', 'AC', '全部用例通过', 2, 2, 39, 2048, UTC_TIMESTAMP(), UTC_TIMESTAMP()
      FROM problems ORDER BY id LIMIT 1;" >/dev/null
-SUB2="$(sql "SELECT id FROM submissions WHERE user_id=${ID_A} ORDER BY id DESC LIMIT 1;")"
+SUB2="$(sql "SELECT id FROM submissions WHERE user_id=${ID_A} AND message='全部用例通过' ORDER BY id DESC LIMIT 1;")"
 # 一条 failed/JE：canRetry 与 1011 的判定都要用它（[D-49]/[D-58]）
 sql "INSERT INTO submissions (user_id, problem_id, language, code, status, verdict, message, case_passed, case_total, total_ms, max_mem_kb, created_at)
      SELECT ${ID_A}, id, 'cpp', 'class Solution { /* JE */ };', 'failed', 'JE', '测试程序未能运行（平台错误）', NULL, NULL, NULL, NULL, UTC_TIMESTAMP()
@@ -277,10 +295,10 @@ echo "[16] POST /api/submissions/{id}/retry"
 api "重跑一条 done 的提交 → 409/1011" POST "/api/submissions/${SUB1}/retry" 409 1011 -b "${jar_a}"
 api "重跑他人的提交 → 403/1003" POST "/api/submissions/${SUB_B}/retry" 403 1003 -b "${jar_a}"
 api "重跑不存在的提交 → 404/1004" POST '/api/submissions/999999995/retry' 404 1004 -b "${jar_a}"
-# failed/JE 是唯一可重跑的前置条件；judge 未接线时先回 1009 且【不建行】
-api "重跑 failed/JE（判题器未接线）→ 503/1009" POST "/api/submissions/${SUB_JE}/retry" 503 1009 -b "${jar_a}"
-printf '        未因重跑产生新行：%s（期望 0）\n' \
-  "$(sql "SELECT COUNT(*) FROM submissions WHERE user_id=${ID_A} AND code LIKE '%JE%' AND status='pending';")"
+# failed/JE 是唯一可重跑的前置条件；judge 已接线 ⇒ 按 [D-58] 【新增一条】、原记录不变
+api "重跑 failed/JE → 201/0（新增记录）" POST "/api/submissions/${SUB_JE}/retry" 201 0 -b "${jar_a}"
+printf '        含 JE 代码的记录数：%s（期望 2 = 原记录 + 重跑新增的一条）\n' \
+  "$(sql "SELECT COUNT(*) FROM submissions WHERE user_id=${ID_A} AND code LIKE '%JE%';")"
 
 # ---------------------------------------------------------------- 17. 统计
 echo
@@ -313,6 +331,142 @@ printf '        userCount=%s problemCount=%s judgeAlive=%s activeJudges=%s users
   "$(data_key '.data.system.userCount')" "$(data_key '.data.system.problemCount')" \
   "$(data_key '.data.system.judgeAlive')" "$(data_key '.data.system.activeJudges')" \
   "$(data_key '.data.users|length')"
+
+# ---------------------------------------------------------------- 21. 管理写侧（阶段 2 · D-37 变更）
+echo
+echo "[21] 管理端写操作（阶段 2）"
+# 新建一个【非 admin】用户 C：既用它验 1003，也用它做"归档题不收提交"的干净主体
+# （窗口 0 次、并发 0 条 ⇒ 只可能被归档闸 1004 拒绝，不会被 1006/1007 抢答）
+USER_C="${RUN_ID}c"
+PASS_C="${RUN_ID}pass1234"
+jar_c="${TMP}/c.jar"
+api "注册用户 C → 201/0" POST /api/auth/register 201 0 \
+  -H 'Content-Type: application/json' -d "{\"username\":\"${USER_C}\",\"password\":\"${PASS_C}\"}"
+ID_C="$(data_key '.data.userId')"
+api "用户 C 登录 → 200/0" POST /api/auth/login 200 0 \
+  -c "${jar_c}" -H 'Content-Type: application/json' -d "{\"username\":\"${USER_C}\",\"password\":\"${PASS_C}\"}"
+api "题目清单（含归档位）→ 200/0" GET /api/admin/problems 200 0 -b "${jar_a}"
+printf '        problems[]=%s\n' "$(data_key '.data.problems|length')"
+api "非 admin 看题目清单 → 403/1003" GET /api/admin/problems 403 1003 -b "${jar_c}"
+
+# 新建：以现成题目文件为模板改 slug/title —— 保证必填字段齐全（§4.1）
+NEW_SLUG="${RUN_ID}p"
+NEW_JSON="$(jq -c --arg s "${NEW_SLUG}" --arg t "e2e 新题" '.slug=$s | .title=$t' "problems/${SLUG}.json")"
+api "新建题目 → 201/0" POST /api/admin/problems 201 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --argjson j "${NEW_JSON}" '{json:$j}')"
+expect_eq "文件已落盘 problems/${NEW_SLUG}.json" "$([[ -f "problems/${NEW_SLUG}.json" ]] && echo yes || echo no)" "yes"
+expect_eq "DB 同步出 problems 行" \
+  "$(sql "SELECT COUNT(*) FROM problems WHERE slug='${NEW_SLUG}';")" "1"
+
+api "同名再建 → 409/1005" POST /api/admin/problems 409 1005 \
+  -b "${jar_a}" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --argjson j "${NEW_JSON}" '{json:$j}')"
+# 校验用【编辑】而不是新建：新建先撞 1005（文件已存在），而"校验不过时一个字节都不动"
+# 恰恰要看的是编辑路径 —— 校验在落盘之前
+api "编辑时缺 cases → 400/1001（reason 列出逐条问题）" PUT "/api/admin/problems/${NEW_SLUG}" 400 1001 \
+  -b "${jar_a}" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --argjson j "$(jq -c 'del(.cases)' <<<"${NEW_JSON}")" '{json:$j}')"
+expect_eq "校验失败未动磁盘上的文件（slug 仍是原值）" \
+  "$(jq -r '.slug' "problems/${NEW_SLUG}.json")" "${NEW_SLUG}"
+expect_eq "校验失败未动 DB（标题仍是原值）" \
+  "$(sql "SELECT title FROM problems WHERE slug='${NEW_SLUG}';")" "e2e 新题"
+api "缺 json 包裹层 → 400/1001" POST /api/admin/problems 400 1001 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"slug":"x"}'
+api "读文件原文 → 200/0" GET "/api/admin/problems/${NEW_SLUG}" 200 0 -b "${jar_a}"
+expect_eq "读回的 json.slug 与路径一致" "$(data_key '.data.json.slug')" "${NEW_SLUG}"
+
+api "编辑：json.slug 与路径不一致 → 400/1001" PUT "/api/admin/problems/${NEW_SLUG}" 400 1001 \
+  -b "${jar_a}" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --argjson j "$(jq -c '.slug="some-other-slug"' <<<"${NEW_JSON}")" '{json:$j}')"
+api "编辑成功 → 200/0" PUT "/api/admin/problems/${NEW_SLUG}" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --argjson j "$(jq -c '.title="e2e 改过的标题"' <<<"${NEW_JSON}")" '{json:$j}')"
+expect_eq "标题已同步进 DB（不重启）" \
+  "$(sql "SELECT title FROM problems WHERE slug='${NEW_SLUG}';")" "e2e 改过的标题"
+
+api "下线归档 → 200/0" POST "/api/admin/problems/${NEW_SLUG}/archive" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"archived":true}'
+api "归档后匿名读详情 → 404/1004" GET "/api/problems/${NEW_SLUG}" 404 1004
+# 用【全新】的 C 提交：它的窗口 0 次、并发 0 条 —— 于是这条只可能由归档闸（1004）拒绝，
+# 不会被 1006/1007 抢答（那些闸在它之前，见 routes.cpp handle_submission_create 的顺序）
+api "归档题不再收提交（1004）" POST /api/submissions 404 1004 \
+  -b "${jar_c}" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --arg s "${NEW_SLUG}" '{problemSlug:$s, code:"int main(){}"}')"
+api "归档后管理端仍看得到 archived=true → 200/0" GET /api/admin/problems 200 0 -b "${jar_a}"
+expect_eq "归档位为 true" \
+  "$(data_key ".data.problems[] | select(.slug==\"${NEW_SLUG}\") | .archived")" "true"
+api "archived 非布尔 → 400/1001" POST "/api/admin/problems/${NEW_SLUG}/archive" 400 1001 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"archived":"yes"}'
+api "恢复上架 → 200/0" POST "/api/admin/problems/${NEW_SLUG}/archive" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"archived":false}'
+api "上架后匿名又能读到 → 200/0" GET "/api/problems/${NEW_SLUG}" 200 0
+
+api "全站提交清单 → 200/0" GET '/api/admin/submissions?page=1&size=5' 200 0 -b "${jar_a}"
+printf '        list=%s total=%s page=%s size=%s\n' \
+  "$(data_key '.data.list|length')" "$(data_key '.data.total')" \
+  "$(data_key '.data.page')" "$(data_key '.data.size')"
+api "非 admin 看提交清单 → 403/1003" GET '/api/admin/submissions' 403 1003 -b "${jar_c}"
+api "非 admin 删提交 → 403/1003" DELETE "/api/admin/submissions/${SUB1}" 403 1003 -b "${jar_c}"
+api "删除失败提交 → 200/0" DELETE "/api/admin/submissions/${SUB_JE}" 200 0 -b "${jar_a}"
+api "再删同一条 → 404/1004" DELETE "/api/admin/submissions/${SUB_JE}" 404 1004 -b "${jar_a}"
+api "重判一条 done → 201/0" POST "/api/admin/submissions/${SUB1}/rejudge" 201 0 -b "${jar_a}"
+api "重判不存在的提交 → 404/1004" POST '/api/admin/submissions/999999994/rejudge' 404 1004 -b "${jar_a}"
+
+api "给 USER_B 升管理员 → 200/0" POST "/api/admin/users/${USER_B}/role" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"role":"admin"}'
+expect_eq "role 已写进 DB" "$(sql "SELECT role FROM users WHERE username='${USER_B}';")" "admin"
+api "改回普通用户 → 200/0" POST "/api/admin/users/${USER_B}/role" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"role":"user"}'
+expect_eq "role 已改回 user" "$(sql "SELECT role FROM users WHERE username='${USER_B}';")" "user"
+api "role 取值非法 → 400/1001" POST "/api/admin/users/${USER_B}/role" 400 1001 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"role":"root"}'
+api "改自己的角色 → 409/1011" POST "/api/admin/users/${USER_A}/role" 409 1011 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"role":"user"}'
+api "停用自己 → 409/1011" POST "/api/admin/users/${USER_A}/disable" 409 1011 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"disabled":true}'
+api "非 admin 停用他人 → 403/1003" POST "/api/admin/users/${USER_B}/disable" 403 1003 \
+  -b "${jar_c}" -H 'Content-Type: application/json' -d '{"disabled":true}'
+
+api "停用用户 C → 200/0" POST "/api/admin/users/${USER_C}/disable" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"disabled":true}'
+expect_eq "disabled 已写进 DB" "$(sql "SELECT disabled FROM users WHERE username='${USER_C}';")" "1"
+api "被停用后登录 → 409/1011（口令正确也进不去）" POST /api/auth/login 409 1011 \
+  -H 'Content-Type: application/json' -d "{\"username\":\"${USER_C}\",\"password\":\"${PASS_C}\"}"
+expect_eq "停用时会话被清空（旧 Cookie 调 me → 401）" \
+  "$(curl -sS -o "${TMP}/body" -w '%{http_code}' -b "${jar_c}" "${BASE}/api/auth/me" 2>/dev/null)" "401"
+api "恢复用户 C → 200/0" POST "/api/admin/users/${USER_C}/disable" 200 0 \
+  -b "${jar_a}" -H 'Content-Type: application/json' -d '{"disabled":false}'
+api "恢复后可正常登录 → 200/0" POST /api/auth/login 200 0 \
+  -H 'Content-Type: application/json' -d "{\"username\":\"${USER_C}\",\"password\":\"${PASS_C}\"}"
+
+# 收尾：删掉本节新建的题目（文件 + 行），避免反复跑测试在题库里堆垃圾
+rm -f "problems/${NEW_SLUG}.json"
+sql "DELETE FROM problems WHERE slug='${NEW_SLUG}';" >/dev/null
+
+# ---------------------------------------------------------------- 22. 限流（阶段 2：1007 / 1006）
+echo
+echo "[22] POST /api/submissions 限流与并发闸（阶段 2）"
+# 手法：给用户 C 用 SQL 造 2 条 pending —— 并发闸（1007）于是恒成立，
+# 合法请求只可能返回 1007（闸门）或 1006（窗口打满）。两者都在【建行之前】判定，
+# 所以反复发不会真的产生提交；第 11 次必须变成 1006 —— 两闸顺序反了这条就会失败。
+api "用户 C 登录 → 200/0" POST /api/auth/login 200 0 \
+  -c "${jar_c}" -H 'Content-Type: application/json' -d "{\"username\":\"${USER_C}\",\"password\":\"${PASS_C}\"}"
+sql "INSERT INTO submissions (user_id, problem_id, language, code, status, created_at)
+     SELECT ${ID_C}, id, 'cpp', '/* 占位：用来顶满并发闸 */', 'pending', UTC_TIMESTAMP()
+     FROM problems ORDER BY id LIMIT 2;" >/dev/null
+api "并发已满 → 429/1007（建行之前就拒绝）" POST /api/submissions 429 1007 \
+  -b "${jar_c}" -H 'Content-Type: application/json' -d "${BODY_TWO_SUM}"
+# 再打 9 次凑满窗口（1006 的计数发生在 1007 之前，故这 9 次都记进滑动窗口）
+for _ in $(seq 1 9); do
+  curl -sS -X POST "${BASE}/api/submissions" -o /dev/null -b "${jar_c}" \
+    -H 'Content-Type: application/json' -d "${BODY_TWO_SUM}" >/dev/null 2>&1
+done
+api "窗口打满 → 429/1006（限流先于并发闸）" POST /api/submissions 429 1006 \
+  -b "${jar_c}" -H 'Content-Type: application/json' -d "${BODY_TWO_SUM}"
+printf '        这 11 次都没有产生任何提交行：%s（期望 0）\n' \
+  "$(sql "SELECT COUNT(*) FROM submissions WHERE user_id=${ID_C} AND code NOT LIKE '%占位%';")"
+sql "DELETE FROM submissions WHERE user_id=${ID_C};" >/dev/null
 
 # ---------------------------------------------------------------- 5. 改密
 echo
@@ -354,7 +508,7 @@ api "注销后账号确实不存在 → 400/1001" POST /api/auth/login 400 1001 
   -H 'Content-Type: application/json' -d "{\"username\":\"${USER_A}\",\"password\":\"newpass1234\"}"
 
 # ---------------------------------------------------------------- 清理
-sql "DELETE FROM users WHERE username IN ('${USER_A}','${USER_B}');" >/dev/null
+sql "DELETE FROM users WHERE username IN ('${USER_A}','${USER_B}','${USER_C}');" >/dev/null
 
 echo
 echo "=== 结果：通过 ${PASS}，失败 ${FAIL} ==="

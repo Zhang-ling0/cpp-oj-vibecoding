@@ -14,8 +14,8 @@
 //   只有一份时动画走到一半就露出空白边缘，那是最容易被看穿的一处偷懒。
 // =============================================================================
 
-import { get } from './api.js?v=20261015-5';
-import { renderTopbar, currentUser } from './common.js?v=20261015-5';
+import { get } from './api.js?v=20261021-1';
+import { renderTopbar, currentUser } from './common.js?v=20261021-1';
 
 export function initLandingPage(root) {
   renderTopbar(root.querySelector('#topbar'), { active: 'landing' });

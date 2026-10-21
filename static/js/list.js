@@ -17,9 +17,9 @@
 //   300ms 是"手速停顿"的经验值：短到感觉不到，长到足够合并连续输入。
 // =============================================================================
 
-import { get, post, currentUser } from './api.js?v=20261015-5';
-import { escapeHtml, toast, renderTopbar } from './common.js?v=20261015-5';
-import { renderOverviewBar } from './overview.js?v=20261015-5';
+import { get, post, currentUser } from './api.js?v=20261021-1';
+import { escapeHtml, toast, renderTopbar } from './common.js?v=20261021-1';
+import { renderOverviewBar } from './overview.js?v=20261021-1';
 
 const PAGE_SIZE = 20;
 const DIFF_TEXT = { easy: '简单', medium: '中等', hard: '困难' };

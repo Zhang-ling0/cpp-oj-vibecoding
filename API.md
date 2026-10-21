@@ -610,7 +610,7 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 > "入队判题"，而 judge 调度器（T2.7）尚未接线，故它们今天稳定回 `1009 / 503` 且【不落库】——
 > 这样库里不会出现一批永远 `pending` 的死提交。四个读/写端点不依赖 judge，全部可用。
 
-### 5.1 `POST /api/submissions` 🟠（judge 未接线）
+### 5.1 `POST /api/submissions` ✅
 
 提交代码判题。**立即返回**，前端用返回的 `submissionId` 启动轮询 `[D-10] [D-27]`。
 
@@ -619,7 +619,7 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `problemSlug` | string | 是 | 题目标识 |
-| `language` | string | 否 | 默认 `"cpp"`（首版只支持 C++） |
+| `language` | string | 否 | 默认 `"cpp"`；**白名单校验**（P1-10）：非 `"cpp"` → `1001` + `data.field="language"` |
 | `code` | string | 是 | **≤ 64 KB**（`OJ_MAX_CODE_BYTES`），前端拦截 + 后端二次校验 |
 
 **成功响应** `201 Created`
@@ -649,9 +649,14 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 | `1009` | 503 | judge 调度器未启动 / 队列满 ← **当前就是这个分支** |
 | `1008` | 500 | DB 异常 |
 
-> **当前状态（V2.7）**：judge 调度器（T2.7）尚未接线，本端点在校验通过后稳定回 `1009`，
-> 且**一条行都不写**。判题器接线后只需把 `submission_api::judge_available()` 改成读调度器存活状态，
-> 路由层与 SQL 一行都不用动。
+> **闸门顺序（阶段 1/2 实现，不可随意调换）**：参数与 slug 校验 → `1002`（登录）→
+> **`1006` 滑动窗口限流（纯内存，先于 DB 租约）** → **`1007` 并发配额（DB 计数，在建行之前）** →
+> `1009`（`judge_available()`）→ 建行入队。顺序的理由：
+> 限流在最前 ⇒ 每一个被拒的请求都**不占用 DB 租约**（串行化 DB 下，被刷的正是那把锁）；
+> `1007` 必须在建行前 ⇒ 否则"自己把自己顶到超限"（建完行再判，行已经算进配额了）；
+> `1009` 在建行前 ⇒ 拒绝时不落任何行（否则前端会轮询一条永远没人判的 pending）。
+>
+> **当前状态（阶段 1 已完成）**：判题调度器已接线，`1009` 只在调度器未启动时触发。
 
 **轮询节奏**：前端每 1.5 s 调一次 `GET /api/submissions/{id}`；`queueAhead` 为 `n>0` 时每秒递减 1（推算，不额外请求）。提交 id 存 sessionStorage，页面加载时自动恢复轮询 `[D-53]`。
 
@@ -915,6 +920,17 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 
 ## 7. 管理
 
+> **`[D-37]` 变更记录（阶段 2 · 2026-10-21，显式修改）**
+> 原 D-37：admin 页面**严格只读**，一切写操作只能改 `.env` + 重启。
+> 本阶段变更为：**题目 CRUD（写文件 + 单题同步入库）、提交删除/重判、用户改角色/停用**
+> 在管理台页面上可写（§7.2–§7.11）。**未被推翻的部分**：
+> 1. 管理员身份的声明式真源仍是 `OJ_ADMIN_USERNAMES`（启动同步）—— 页面改角色会在**下次启动被覆盖回配置**；
+> 2. 不物理删题（只有 `archived` 下线开关，可恢复），历史提交一律保留；
+> 3. 不提供 impersonation、不提供"查看他人代码"以外的任何越权能力；
+> 4. 不能改自己的角色、不能停用自己（服务端 `1011`，前端置灰）。
+>
+> 所有管理端点共用守卫 `require_admin_viewer`：先判登录（`1002`），再判角色（`1003`），顺序不可颠倒。
+
 ### 7.1 `GET /api/admin/overview` ✅
 
 **只读**管理面板的数据源 `[D-37]`。业务层 `src/web/admin.cpp` 已实现并被单测覆盖，HTTP 路由已接线。
@@ -958,6 +974,7 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 | 字段 | 说明 |
 |---|---|
 | `username` / `role` / `createdAt` | 基础信息（UTC） |
+| `disabled` | 阶段 2 新增：`true` = 已停用（登录被拒 + 存量会话已清空） |
 | `submissionCount` / `acCount` | 提交总数 / AC 条数 |
 | `solved` / `attempted` | 与 §6.5 **完全同口径**：AC 过的题同时计入两者（不是互斥） |
 | `favorites` | 收藏题数 |
@@ -976,7 +993,118 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 1. **锁顺序：先取 scheduler 快照 → 释放其锁 → 再取 DB 租约**。反过来会引入一条 `DB mutex → scheduler lock` 的嵌套边，与 §2.3 的既有锁顺序冲突（与 judge 写回事务的 `scheduler → DB` 边构成死锁四要素）。
 2. `system` 的 8 个 DB 计数合成**一条 SQL** 的标量子查询（串行化 DB 下，八次往返就是八次停顿）。
 3. `users[]` **不是** per-user 相关子查询风暴，而是先把 `submissions` / `user_problems` 各 `GROUP BY user_id` 收敛成小表再 `LEFT JOIN users`。
-4. **严格只读**：没有增删改、不能禁用用户、不能改角色、不能在线编辑题库、不能 impersonation、不能查看他人提交。角色只经 `.env` + 重启调整。
+4. **只读部分（阶段 2 变更后仍然成立）**：本端点自身没有任何增删改，也不能 impersonation。
+   阶段 2 新增的写端点见 §7.2–§7.11，角色的**声明式真源**仍是 `.env` + 重启。
+
+---
+
+### 7.2 `GET /api/admin/problems` ✅（阶段 2）
+
+题目清单，**含已归档题**（归档要能被"恢复上架"，藏起来等于删除）。
+
+```json
+{ "code": 0, "message": "ok",
+  "data": { "problems": [
+    { "id": 1, "slug": "two-sum", "title": "两数之和", "difficulty": "easy",
+      "caseCount": 5, "isFeatured": true, "archived": false,
+      "sortNo": 10, "updatedAt": "2026-10-21 03:00:00" } ] } }
+```
+
+### 7.3 `GET /api/admin/problems/{slug}` ✅（阶段 2）
+
+读**文件原文**（编辑器回显）。`data.json` 是解析后的对象，保存时必须原样写回 ——
+文件是唯一真源（D-30），DB 只是它的投影。
+
+```json
+{ "code": 0, "message": "ok", "data": { "slug": "two-sum", "json": { "slug": "two-sum", "…": "…" } } }
+```
+
+| code | HTTP | 触发 |
+|---|---|---|
+| `1004` | 404 | slug 不存在，或形状非法（含 `..`、`/`、非 `[A-Za-z0-9_-]`）按不存在处理 |
+| `1008` | 500 | 文件读取失败 / 文件已不是合法 JSON（被人手改坏） |
+
+### 7.4 `POST /api/admin/problems` ✅（阶段 2）
+
+新建题目。**请求体是 `{"json": {…题目全文…}}`** —— 外层包一层是为了给将来
+（如"只传增量字段"）留位置，同时让"哪个字段是题目 JSON"在协议上无歧义。
+
+**顺序**：slug 路径安全校验 → `parse_problem_json`（§4.1 全量校验）→ 临时文件 + `rename` 原子落盘 →
+`problem::sync_one` 同步入库 + 刷新只读缓存（**不重启**）。任何一步失败：磁盘回到写前状态
+（新建失败则删掉刚写的文件），**不会留下"文件新、DB 旧"的中间态**。
+
+`201 Created` → `data: {"slug": "…"}`
+
+| code | HTTP | 触发 |
+|---|---|---|
+| `1001` | 400 | 校验不过（`data.field="json"`，`data.reason` = 逐条 issue 清单）、`slug` 缺失 |
+| `1005` | 409 | 同名文件已存在 |
+| `1008` | 500 | 写文件 / 同步入库失败（已回滚） |
+
+### 7.5 `PUT /api/admin/problems/{slug}` ✅（阶段 2）
+
+编辑题目。语义同 §7.4，差别只有两处：`json.slug` **必须与路径一致**（不一致 → `1001` + 点名两个值）；
+文件必须已存在（否则 `1004`）。成功 `200` → `data: {"slug": "…"}`。
+
+### 7.6 `POST /api/admin/problems/{slug}/archive` ✅（阶段 2）
+
+下线归档 / 恢复上架。`{"archived": true}` = 下线：从列表、详情、提交入口、收藏、
+"下一题建议"中消失（**已有历史提交不受影响**，题在判题缓存里也保留）；
+`false` = 恢复。`archived` 不参与题库同步的 UPDATE，故重启重放文件**不会把它冲掉**。
+
+`200 OK` → `data: {"slug":"…","archived":true}`；`archived` 非布尔 → `1001`（`data.field="archived"`）；slug 不存在 → `1004`。
+
+### 7.7 `GET /api/admin/submissions?page=&size=` ✅（阶段 2）
+
+全站提交清单（不分用户）。参数按 §1.5：`page ≥ 1`、`size` 超上限**夹到上限**并在响应里回显；
+当前**只支持分页**，`problemSlug`/`verdict` 参数被接受但忽略（解析器共用，未启用筛选）。
+
+```json
+{ "code": 0, "message": "ok",
+  "data": { "list": [ { "id": 91, "username": "alise", "problemSlug": "two-sum",
+      "problemTitle": "两数之和", "language": "cpp", "status": "done",
+      "verdict": "AC", "createdAt": "2026-10-21 03:00:00" } ],
+    "total": 1284, "page": 1, "size": 20 } }
+```
+
+### 7.8 `DELETE /api/admin/submissions/{id}` ✅（阶段 2）
+
+删除提交（连带逐用例结果与编译诊断，外键级联）。`200` → `data.message`；
+`1004` 不存在；`1009`/`1011`（`status IN ('pending','judging')` → 1011 + "正在评测中，请等它结束"）；`1008` DB 异常。
+
+### 7.9 `POST /api/admin/submissions/{id}/rejudge` ✅（阶段 2）
+
+重判：**重置原记录**回 `pending`（清空 `submission_case_results` / `submission_compile_errors`，verdict/message 置空）
+并重新入队 —— 与普通用户的"重跑"（§5.6，[D-58] 新增一条）**不同**，管理员要的是"这条结论错了"。
+
+`201` → `data: {"submissionId":91,"status":"pending"}`
+
+| code | HTTP | 触发 |
+|---|---|---|
+| `1009` | 503 | judge 未接线 —— **先于改库检查**，拒绝时一行都不动 |
+| `1011` | 409 | 该提交正在评测中 |
+| `1004` | 404 | 不存在 |
+
+### 7.10 `POST /api/admin/users/{username}/role` ✅（阶段 2）
+
+`{"role": "admin" | "user"}`。`200` → `data: {"username":"…","role":"…"}`；幂等（已是该角色也回 `0`）。
+
+| code | HTTP | 触发 |
+|---|---|---|
+| `1001` | 400 | role 不在两值之内（`data.field="role"`） |
+| `1011` | 409 | 改**自己**（会把当前会话锁在门外） |
+| `1004` | 404 | 用户不存在 |
+
+> ⚠️ **这次改动不是新的真源**：`OJ_ADMIN_USERNAMES` 在下次启动时同步会覆盖它（D-37 未变）。
+> `app.log` 会在每次改角色时 WARN 一次提醒这层覆盖关系。
+
+### 7.11 `POST /api/admin/users/{username}/disable` ✅（阶段 2）
+
+`{"disabled": true}` 停用 / `false` 恢复。停用 = `users.disabled=1` **+ 同事务清空该用户全部 `sessions`**
+（正在使用的登录当场失效，而不是等到 7 天过期）；同时 `login_user` 在**口令比对通过之后**返回 `1011`
+「账号已被停用」—— 放在比对之后是为了不让登录接口变成"这个用户名存在且被停用"的枚举器。
+
+`200` → `data: {"username":"…","disabled":true}`；停用自己 → `1011`；不存在 → `1004`。
 
 ---
 
@@ -1033,13 +1161,13 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 | `GET /api/stats` | ✅ | ✅ | — | **可用** |
 | `GET /api/me/overview` | ✅ | ✅ | — | **可用** |
 | 提交组读侧 4 个（列表/详情/diff/删除） | ✅ | ✅ `submission_api.cpp` | — | **可用** |
-| `POST /api/submissions` | ✅ | ✅ | — | 🟠 走 `1009`（judge 未接线） |
-| `POST /api/submissions/{id}/retry` | ✅ | ✅ | — | 🟠 走 `1009`（judge 未接线） |
+| `POST /api/submissions` | ✅ | ✅（含 1006/1007 闸门） | — | **可用** |
+| `POST /api/submissions/{id}/retry` | ✅ | ✅ | — | **可用** |
+| 管理写侧（阶段 2）：题目 list/get/create/update/archive、提交 list/delete/rejudge、用户 role/disable | ✅ | ✅ `admin.cpp` + `routes.cpp` | — | **可用**（curl 已验） |
+| 限流 1006 / 1007 | ✅ | ✅ `web/ratelimit.cpp` | — | **可用**（配置见 §1.6） |
 
-**尚未接线的两块**：judge 调度器（T2.7：`src/judge/{queue,scheduler,worker,runner,generator}.*` 仍是空文件）与
-限流（`include/web/ratelimit.h` 空文件）。前者挡住 `POST /api/submissions` 与 `/retry` 的 201 分支，
-后者让 `1006 / 1007` 两个码暂时不可达。包络（`common::response.h`）与 Cookie → `ViewerContext`
-（`web::session.h` 的 `authenticate()`）在本轮接线时已就位。
+**状态说明（阶段 2 之后）**：judge 调度器与限流均已接线，`1009` 只在调度器未启动时出现，
+`1006`/`1007` 已可达。管理端写侧属 `[D-37]` 显式变更，变更记录见 §7 开头。
 
 ### 9.2 与 SPEC 的已知差异 / 开放问题
 
@@ -1047,11 +1175,12 @@ Set-Cookie: sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan
 |---|---|---|---|---|
 | 1 | 静态文件 404 | 返回 `404.html` 或重定向到 `list.html` | JSON 包络 `404 / 1004` | 前端 `api.js` 的「先判 JSON 再判状态」逻辑正是为此写的；改回 HTML 需同步改前端 |
 | 2 | 413 收口 | 请求体超限 → 1001 | 映射已写好，但**未设置 `payload_max_length`**，httplib 默认 100 MB | 分支实际不可达；64 KB 代码上限应由 `OJ_MAX_CODE_BYTES` 在业务层拦截 |
-| 3 | 角色同步 | 启动时按 `OJ_ADMIN_USERNAMES` 双向同步 | **未接线（T3.11）** | 改 `.env` 并重启不生效；`role` 目前就是库里的既有值（启动回显里已打这句提示） |
+| 3 | 角色同步 | 启动时按 `OJ_ADMIN_USERNAMES` 双向同步 | ✅ 已接线（阶段 1 `main.cpp` T3.11） | 改 `.env` + 重启即生效；与阶段 2 的"页面改角色"并存时**以配置为准**（下次启动覆盖页面改动） |
 | 4 | `queueAhead` 的全局闸门 | 全局 8 | 配置现值 **4**（`OJ_JUDGE_GATE`，= 2 × worker 2）`[D-74]` | 不改契约，只改配置；兜底墙钟余量由 1.46× 升到 2.9× |
-| 5 | 限流 | `1006` / `1007` | `ratelimit.h` 空文件 | 提交组接线时必须补，否则配额形同虚设 |
+| 5 | 限流 | `1006` / `1007` | ✅ 已实现（阶段 2 `web/ratelimit.cpp`，配置见 §1.6） | 1006 纯内存滑窗；1007 为 DB 派生配额，均在建行前 |
 | 6 | 方法不被接受 | 405 | 404（httplib 0.60 不产生 405） | 码仍是 `1004`，前端无感；`routes.cpp` 的 `case 405` 不可达 |
-| 7 | 提交 / 重跑 | 201 + `submissionId` | 校验通过后回 `1009 / 503` 且不落库 | judge 调度器（T2.7）未接线；接上 `judge_available()` 即可 |
+| 7 | 提交 / 重跑 | 201 + `submissionId` | ✅ judge 已接线（阶段 1） | `1009` 只在调度器未启动时出现 |
+| 8 | 校验失败的题 | 列表页过滤掉 | **仍出现在列表页**（`caseCount=0`、详情无用例） | 实测钉死（`tests/run_problemsync_test.sh` §3）：列表端点直接查 `problems` 且无失效过滤。要过滤需加失效标记列 |
 | 8 | 校验失败的题 | 列表页过滤掉 | **仍出现在列表页**（`caseCount=0`、详情无用例） | 实测钉死（`tests/run_problemsync_test.sh` §3）：列表端点直接查 `problems` 且无失效过滤。要过滤需加失效标记列 |
 
 ---

@@ -23,9 +23,9 @@
 //   不通过就不发请求；旧密码错时**新密码框不清空**（§7.4：便于只改旧密码后重试）。
 // =============================================================================
 
-import { get, post, del, logout as apiLogout, currentUser } from './api.js?v=20261015-5';
-import { escapeHtml, toast, renderTopbar, relativeTime, formatLocalTime, redirectToLogin } from './common.js?v=20261015-5';
-import { renderProgressPanel } from './overview.js?v=20261015-5';
+import { get, post, del, logout as apiLogout, currentUser } from './api.js?v=20261021-1';
+import { escapeHtml, toast, renderTopbar, relativeTime, formatLocalTime, redirectToLogin } from './common.js?v=20261021-1';
+import { renderProgressPanel } from './overview.js?v=20261021-1';
 
 const PAGE_SIZE = 20;                                   // [D-61] 默认 20 条/页
 const PASSWORD_MIN = 6;
@@ -212,7 +212,7 @@ function bindRows(el, state) {
     if (event.target.closest('[data-retry]') !== null) return;
     const row = event.target.closest('[data-id]');
     if (row === null) return;
-    toggleDetail(el, Number(row.dataset.id));
+    toggleDetail(el, state, Number(row.dataset.id));
   });
 
   // 键盘可达：Enter / Space 与点击等价（行是 tabindex=0 的可聚焦元素）
@@ -221,7 +221,7 @@ function bindRows(el, state) {
     const row = event.target.closest('[data-id]');
     if (row === null) return;
     event.preventDefault();
-    toggleDetail(el, Number(row.dataset.id));
+    toggleDetail(el, state, Number(row.dataset.id));
   });
 
   el.pager.addEventListener('click', (event) => {
@@ -235,12 +235,21 @@ function bindRows(el, state) {
 /**
  * 展开 / 收起一条提交的详情。同一时刻最多展开一条 —— 历史可能有几百行，
  * 全部展开会让页面变成一片表格，也让人失去"我在看哪一条"的位置感。
+ *
+ * state 从 bindRows 透传进来：详情里的删除/重跑成功后要回到 loadSubmissions 刷新列表，
+ * 而它拿不到 initHistoryPage 的局部 state（早先没传，展开时在闭包里 ReferenceError，
+ * 表现是行永远停在"加载中…"）。
  */
-function toggleDetail(el, id) {
+function toggleDetail(el, state, id) {
   const existing = el.rows.querySelector('[data-detail]');
-  if (existing !== null) {          // 已展开 → 收起（点哪一行都先收起，符合直觉）
+  if (existing !== null) {
+    // P1-7：点【同一行】才是收起；点【别的行】应直接切到那一条。
+    // 原实现"只要展开着就先收起"，想连续看两条得各点两次。
+    if (existing.dataset.detail === String(id)) {
+      existing.remove();
+      return;
+    }
     existing.remove();
-    return;
   }
 
   const row = el.rows.querySelector(`[data-id="${id}"]`);

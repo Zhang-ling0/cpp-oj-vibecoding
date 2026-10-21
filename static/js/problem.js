@@ -23,11 +23,11 @@
 //   登录成功后原地继续，提交意图由"登录框内联完成"自然衔接，不需要 sessionStorage 暂存。
 // =============================================================================
 
-import { get, post, currentUser, invalidateCurrentUser } from './api.js?v=20261015-5';
-import { escapeHtml, toast, renderTopbar, formatLocalTime } from './common.js?v=20261015-5';
-import { renderMarkdown } from './markdown.js?v=20261015-5';
-import { createEditor, loadDraft, saveDraft, flushDraft, SAVE_DEBOUNCE_MS } from './editor.js?v=20261015-5';
-import { startPolling, pendingSubmissionId, isStillJudging, isSlow } from './poll.js?v=20261015-5';
+import { get, post, currentUser, invalidateCurrentUser } from './api.js?v=20261021-1';
+import { escapeHtml, toast, renderTopbar, formatLocalTime } from './common.js?v=20261021-1';
+import { renderMarkdown } from './markdown.js?v=20261021-1';
+import { createEditor, loadDraft, saveDraft, flushDraft, SAVE_DEBOUNCE_MS } from './editor.js?v=20261021-1';
+import { startPolling, pendingSubmissionId, isStillJudging, isSlow } from './poll.js?v=20261021-1';
 
 const MAX_CODE_BYTES = 65536;        // §5.8 / OJ_MAX_CODE_BYTES，与服务端同值
 const DIFF_TEXT = { easy: '简单', medium: '中等', hard: '困难' };
@@ -173,12 +173,21 @@ function renderHead(el, data) {
       `<div class="notice notice--error">题面渲染失败：${escapeHtml(error.message)}</div>`;
     toast('题面渲染失败，请检查前端依赖', 'error', 6000);
   }
-  renderRecent(el, data.recentSubmissions || []);
+  renderRecent(el, data.recentSubmissions || [], data.nextRecommendation !== undefined);
 }
 
-function renderRecent(el, list) {
+/**
+ * tab3 最近提交。authenticated 的判据与 renderNext 同源：后端对匿名【整个字段不下发】
+ * nextRecommendation（§5.2 / [D-43]）。P1-14：匿名时空数组与"登录了但没提交"在
+ * recentSubmissions 上无法区分，只说"还没有提交记录"会让人以为这题没人做过。
+ */
+function renderRecent(el, list, authenticated) {
   if (list.length === 0) {
-    el.recent.innerHTML = '<p class="muted">还没有提交记录</p>';
+    el.recent.innerHTML = authenticated
+      ? '<p class="muted">还没有提交记录</p>'
+      : '<p class="muted">登录后可查看你在本题的提交记录</p>' +
+        '<p><a class="btn btn--ghost" href="/login.html?redirect=' +
+        encodeURIComponent(location.pathname + location.search) + '">去登录</a></p>';
     return;
   }
   el.recent.innerHTML = list.map((item) => {
@@ -280,6 +289,10 @@ function setupEditor(el, data) {
     flushDraft(data.slug, data.codeTemplate);
     page.editor.markErrors([]);
   });
+
+  // 「提交」按钮与 Ctrl/⌘+Enter 走同一条 submit()：匿名在这里开内联登录框，
+  // 已登录则提交。之前只绑了编辑器快捷键，点按钮无任何反应。
+  el.submit.addEventListener('click', () => submit(el, data));
 }
 
 function setupSplitter(el) {
@@ -383,10 +396,12 @@ function submit(el, data) {
  * 那是实现状态，不是用户能据此行动的信息。内部提示另起一行（见调用处）。
  */
 function submitErrorText(reply) {
-  if (reply.code === 1006) return '提交过于频繁，请稍后再试（每分钟上限 10 次）';
-  if (reply.code === 1007) return '你已有 2 个评测在进行中，请等它们结束';
-  if (reply.code === 1004) return '题目不存在';
-  if (reply.code === 1001) return reply.message || '提交内容不合法';
+  // 1006/1007 的真实数字（窗口、上限、当前并发）由服务端算好放在 message 里，
+  // 前端不再写死"每分钟 10 次 / 2 个评测" —— 改了 .env 却不改前端就会出现两套说法。
+  if (reply.code === 1006) return reply.message || '提交过于频繁，请稍后再试';
+  if (reply.code === 1007) return reply.message || '已有评测在进行中，请等它们结束';
+  if (reply.code === 1004) return '题目不存在或已下线';
+  if (reply.code === 1001) return reply.data?.reason || reply.message || '提交内容不合法';
   return reply.message || '提交失败';
 }
 
@@ -618,7 +633,7 @@ export function bindInlineLogin(root) {
       // nextRecommendation 整个字段不下发），不重拉就一直是登录前的样子
       const detail = await get(`/api/problems/${encodeURIComponent(page.slug)}`);
       if (detail.code === 0) {
-        renderRecent(page.el, detail.data.recentSubmissions || []);
+        renderRecent(page.el, detail.data.recentSubmissions || [], true);   // 刚登录完，必然是 true
         renderNext(page.el, detail.data);
       }
 

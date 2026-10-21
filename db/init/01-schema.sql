@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS users (
   username      VARCHAR(32)  NOT NULL,   -- 唯一性只由下方 UNIQUE KEY uk_username 声明；列上再写内联 UNIQUE 会建出两个等价唯一索引
   password_hash VARCHAR(255) NOT NULL,           -- bcrypt, cost=10
   role          ENUM('user','admin') NOT NULL DEFAULT 'user',  -- D-37 真源为 OJ_ADMIN_USERNAMES，启动时同步，见 §6.3.1
+  disabled      TINYINT(1)   NOT NULL DEFAULT 0, -- 阶段 2：管理员停用（1 = 禁止登录，登录时拒绝并已清会话）
   created_at    DATETIME     NOT NULL,
   UNIQUE KEY uk_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS problems (
   time_limit_ms INT UNSIGNED NOT NULL DEFAULT 3000,
   mem_limit_kb  INT UNSIGNED NOT NULL DEFAULT 131072,
   case_count    INT UNSIGNED NOT NULL DEFAULT 0, -- 受控反范式：= COUNT(problem_cases)，列表页免 JOIN，见 §3.4
+  archived      TINYINT(1)   NOT NULL DEFAULT 0, -- 阶段 2：下线归档（1 = 列表/详情/提交入口不可见；不删行，保住用户历史）
   is_featured   TINYINT(1)   NOT NULL DEFAULT 0, -- 精选置顶
   sort_no       INT          NOT NULL DEFAULT 0,
   created_at    DATETIME     NOT NULL,

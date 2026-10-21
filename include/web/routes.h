@@ -21,14 +21,15 @@
 //   题目与提交端点需要读 DB 时，仍走「先解析 Cookie → 有 sid 才取租约」这条
 //   已在 web/session.h 里定好的口径（authenticate() 的便捷重载正是这个顺序）。
 //
-// 【线程池大小为什么写死 8 而不是读 config().http_threads】
-//   CPPHTTPLIB_THREAD_POOL_COUNT 是【编译期】宏（httplib.h 在 include 时展开），
-//   而 http_threads 是运行期配置。两者在这里恰好都是 8（§2.3 的 N=8、
-//   Config::http_threads 默认值 8），但它们【不是同一件事】：
-//   改了宏等于改了每个 HTTP 线程的栈大小（默认 8MB 虚拟），1967MB 的机器上
-//   这 8 个线程是 64MB 虚拟地址，不是 64MB 常驻 —— 但也不该随手调大。
-//   故：宏按 §2.3 固定 8，config().http_threads 留给 httplib 没有的用途
-//   （例如将来给读超时留不同线程池），两者不同步这件事在此写明而不是留成隐含假设。
+// 【线程池大小：OJ_HTTP_THREADS 是运行期生效的（阶段 2 / P0-2）】
+//   生效途径是 listen_and_serve 里覆盖 `server.new_task_queue`（httplib 公开成员），
+//   用 config().http_threads 建一个【固定】ThreadPool —— 改 .env + 重启即生效，
+//   与 dump_config 打印的值一致。CPPHTTPLIB_THREAD_POOL_COUNT 那个宏只剩兜底意义
+//   （万一忘了覆盖，池子仍是确定的 8，而不是 httplib 按 CPU 推导的动态池）。
+//   为什么坚持【固定】而不是动态扩容：httplib 默认允许池子涨到基数 × 4，
+//   每个线程 8MB 的【虚拟】栈，32 线程就是 256MB 虚拟地址 —— 1967MB 的机器上
+//   这不是"虚拟的所以无所谓"（SPEC §0.0：别过量申请虚拟内存，顶上去照样进 swap）。
+//   固定 8 线程 = 64MB 虚拟，2 核机上够用且有界。
 //
 // 【错误与异常的收口只有两处】
 //   ① 未匹配的路由 / 静态文件不存在 → set_error_handler → 1004 包络

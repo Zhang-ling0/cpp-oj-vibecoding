@@ -30,11 +30,21 @@
 
 #include <nlohmann/json.hpp>
 
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <utility>
 
+#include "common/config.h"
 #include "common/log.h"
 #include "db/mysql_pool.h"
+#include "problem/json_schema.h"
+#include "problem/loader.h"
 
 namespace oj {
 namespace web {
@@ -46,6 +56,13 @@ bool fail(std::string* error, const std::string& what, const db::DbError& db_err
   const std::string detail = what + "：" + db_error.format();
   common::log_error(common::LogChannel::kApp, "管理端点 " + detail);
   if (error != nullptr) *error = detail;
+  return false;
+}
+
+// 与 submission_api.cpp 的同名函数同一约定：不需要 DB 错误原文的失败也走同一条出口。
+bool fail_text(std::string* error, const std::string& what) {
+  common::log_error(common::LogChannel::kApp, "管理端点 " + what);
+  if (error != nullptr) *error = what;
   return false;
 }
 
@@ -166,8 +183,9 @@ SELECT u.id, u.username, u.role, u.created_at,
        COALESCE(f.favorites, 0)  AS favorites,
        s.last_submit_at,
        -- 见文件头：不能用 GROUP_CONCAT，它会跳过 NULL 的 verdict
-       (SELECT s2.verdict FROM submissions s2
-         WHERE s2.user_id = u.id ORDER BY s2.id DESC LIMIT 1) AS last_verdict
+        (SELECT s2.verdict FROM submissions s2
+          WHERE s2.user_id = u.id ORDER BY s2.id DESC LIMIT 1) AS last_verdict,
+        u.disabled
 FROM users u
 LEFT JOIN (
   SELECT user_id,
@@ -203,6 +221,7 @@ ORDER BY u.id
     entry.last_submit_at = row.str(9);
     // verdict 可为 NULL（提交未出结论），此时 str() 返回空串 → to_json 里序列化为 null
     entry.last_verdict = row.str(10);
+    entry.disabled = row.boolean(11);
     rows.push_back(std::move(entry));
   }
   *out = std::move(rows);
@@ -268,12 +287,425 @@ std::string to_json(const Overview& overview) {
         {"favorites", row.favorites},
         {"lastSubmitAt", nullable_text(row.last_submit_at)},
         {"lastVerdict", nullable_text(row.last_verdict)},
+        {"disabled", row.disabled},
     });
   }
 
   // 只序列化 data 块：{code, message, data} 包络由 common::response.h（T0.4）负责，
   // 在那里写第二遍就成了 §9 T3.5 明确禁止的"两套包络"。
   return nlohmann::json{{"system", std::move(system)}, {"users", std::move(users)}}.dump();
+}
+
+// =============================================================================
+// 阶段 2 · 管理端写操作（D-37 变更，见 admin.h 对应段落的说明）
+// =============================================================================
+
+namespace {
+
+// ---- 题目 JSON 文件（D-30：文件是唯一真源）------------------------------------
+
+std::string problem_path(const std::string& slug) {
+  return common::config().problems_dir + "/" + slug + ".json";
+}
+
+// slug 的路径安全校验。json_schema 也会校验 slug 的值域，但那一层的职责是"题库格式对不对"，
+// 这一层的职责是"这个字符串能不能当文件名拼进路径" —— 少了它，slug=../../etc/passwd
+// 会先于任何校验被拼进路径。宁可两层各管一件事。
+bool path_safe_slug(const std::string& slug) {
+  if (slug.empty() || slug.size() > 64) return false;
+  if (slug.front() == '.') return false;   // 以 . 开头会与隐藏临时文件规则混淆
+  for (const char c : slug) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_';
+    if (!ok) return false;                 // '/'、'.'、空格、'..' 全部在此被挡下
+  }
+  return true;
+}
+
+bool read_text_file(const std::string& path, std::string* out, std::string* error) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    if (error != nullptr) *error = "读文件失败：" + path;
+    return false;
+  }
+  std::ostringstream buffer;
+  buffer << file.rdbuf();
+  *out = buffer.str();
+  return true;
+}
+
+bool write_text_file(const std::string& path, const std::string& text, std::string* error) {
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  if (!file) {
+    if (error != nullptr) *error = "写文件失败：" + path;
+    return false;
+  }
+  file << text;
+  file.close();
+  if (!file) {
+    if (error != nullptr) *error = "写文件未完整落盘：" + path;
+    return false;
+  }
+  return true;
+}
+
+// 把 DB 行的"是否归档"与文件内容拼成编辑器回显的 JSON：
+// 文件是真源，archived 是 DB 侧标记（文件里没有这个字段），两者拼在一起回给前端。
+// 编辑提交时前端只回传 json 部分，标记不受影响 —— 这正是"归档不属于题面内容"的落法。
+
+}  // namespace
+
+bool load_admin_problems(db::Session& session, std::vector<AdminProblemRow>* out,
+                         std::string* error) {
+  // 归档题【也列出来】：管理台要能把题恢复上架，藏起来等于把归档做成了删除。
+  static const char* kSql =
+      "SELECT id, slug, title, difficulty, case_count, is_featured, archived, sort_no,"
+      " updated_at FROM problems ORDER BY sort_no ASC, id ASC";
+  const db::ResultSet result = session.run(kSql);
+  if (result.failed()) return fail(error, "题目列表查询失败", result.error());
+
+  std::vector<AdminProblemRow> rows;
+  rows.reserve(result.size());
+  for (const db::Row& row : result.rows()) {
+    AdminProblemRow entry;
+    entry.id = static_cast<int>(row.i64(0));
+    entry.slug = row.str(1);
+    entry.title = row.str(2);
+    entry.difficulty = row.str(3);
+    entry.case_count = row.i64(4);
+    entry.is_featured = row.i64(5) != 0;
+    entry.archived = row.i64(6) != 0;
+    entry.sort_no = static_cast<int>(row.i64(7));
+    entry.updated_at = row.str(8);
+    rows.push_back(std::move(entry));
+  }
+  *out = std::move(rows);
+  return true;
+}
+
+ProblemWriteStatus read_problem_json(const std::string& slug, std::string* out,
+                                     std::string* error) {
+  if (!path_safe_slug(slug)) return ProblemWriteStatus::kMissing;   // 形状非法 ⇒ 按不存在处理
+  const std::string path = problem_path(slug);
+  if (::access(path.c_str(), F_OK) != 0) return ProblemWriteStatus::kMissing;
+  if (!read_text_file(path, out, error)) {
+    common::log_error(common::LogChannel::kApp, "管理端点 " + *error);
+    return ProblemWriteStatus::kIo;
+  }
+  return ProblemWriteStatus::kOk;
+}
+
+ProblemWriteStatus write_problem_json(const std::string& slug, const std::string& text,
+                                      bool require_existing, std::string* error) {
+  if (!path_safe_slug(slug)) {
+    if (error != nullptr) *error = "slug 不合法：只允许字母、数字、- 和 _（≤ 64 字符）";
+    return ProblemWriteStatus::kInvalid;
+  }
+  const std::string path = problem_path(slug);
+  const bool exists = ::access(path.c_str(), F_OK) == 0;
+  if (require_existing && !exists) return ProblemWriteStatus::kMissing;
+  if (!require_existing && exists) return ProblemWriteStatus::kConflict;
+
+  // ① 先校验、后落盘：校验不过时磁盘上的旧题【一个字节都没动】。
+  //    expect_slug = 路径 slug：编辑时 JSON 里的 slug 与路径不一致会被当场点名。
+  problem::ParseOptions options;
+  options.source = path;
+  options.expect_slug = slug;
+  const problem::ParseResult parsed = problem::parse_problem_json(text, options);
+  if (!parsed.ok) {
+    if (error != nullptr) {
+      *error = problem::format_issues(parsed.issues, path);
+    }
+    return ProblemWriteStatus::kInvalid;
+  }
+
+  // ② 写入前留一份旧内容用于回滚：写库失败时文件必须回到写入前的状态，
+  //    否则"文件是真源"就出现了一个 DB 与文件都半新半旧的中间态。
+  std::string previous;
+  if (exists && !read_text_file(path, &previous, error)) {
+    common::log_error(common::LogChannel::kApp, "管理端点 " + *error);
+    return ProblemWriteStatus::kIo;
+  }
+
+  // ③ 原子替换：先写隐藏临时文件（不以 .json 结尾 → 题库加载器的枚举不会扫到它），
+  //    再 rename。写到一半的文件被启动进程读走，比"写失败"更难查。
+  const std::string temp = common::config().problems_dir + "/." + slug + ".json.tmp";
+  std::string io_error;
+  if (!write_text_file(temp, text, &io_error) || ::rename(temp.c_str(), path.c_str()) != 0) {
+    if (io_error.empty()) io_error = std::string("原子替换失败：") + path + "（" +
+                                     std::strerror(errno) + "）";
+    ::remove(temp.c_str());
+    if (error != nullptr) *error = io_error;
+    common::log_error(common::LogChannel::kApp, "管理端点 写回题库失败：" + io_error);
+    return ProblemWriteStatus::kIo;
+  }
+
+  // ④ 文件已就位 → 同步入库 + 就地刷新只读缓存（不重启）。失败则回滚文件。
+  std::string sync_error;
+  if (!problem::sync_one(parsed.problem, &sync_error)) {
+    const char* action = exists ? "回滚" : "删除";
+    if (exists) {
+      std::string rollback_error;
+      if (!write_text_file(path, previous, &rollback_error)) {
+        common::log_error(common::LogChannel::kApp,
+                          "管理端点 写库失败后回滚也失败：" + rollback_error +
+                              "（文件是新内容、DB 是旧内容，重启后 load_all 会重放文件）");
+      }
+    } else {
+      ::remove(path.c_str());
+    }
+    common::log_error(common::LogChannel::kApp,
+                      std::string("管理端点 写库失败，已") + action + "文件：" + sync_error);
+    if (error != nullptr) *error = sync_error;
+    return ProblemWriteStatus::kIo;
+  }
+  return ProblemWriteStatus::kOk;
+}
+
+bool set_problem_archived(db::Session& session, const std::string& slug, bool archived,
+                          bool* found, std::string* error) {
+  *found = false;
+  const db::ResultSet existing =
+      session.run("SELECT id FROM problems WHERE slug = ?", {db::Value::from_text(slug)});
+  if (existing.failed()) return fail(error, "归档：查询题目失败", existing.error());
+  if (existing.empty()) return true;   // found 保持 false → 1004
+  *found = true;
+  // 只动 archived 一个标记列：题面业务列一律经文件写回（D-30），这条 UPDATE 是唯一例外，
+  // 理由见 admin.h【阶段 2】段落。affected_rows 为 0 可能是"值没变"，故不作存在性判据。
+  const db::ResultSet updated = session.run(
+      "UPDATE problems SET archived = ?, updated_at = NOW() WHERE slug = ?",
+      {db::Value::from_bool(archived), db::Value::from_text(slug)});
+  if (updated.failed()) return fail(error, "归档：更新标记失败", updated.error());
+  return true;
+}
+
+bool load_admin_submissions(db::Session& session, int page, int size,
+                            AdminSubmissionPage* out, std::string* error) {
+  if (page < 1 || size < 1) return fail_text(error, "提交管理：分页参数不合法");
+  if (size > 100) size = 100;   // 与 §1.5 的列表上限同值：超过夹到上限而不是报错
+
+  const db::ResultSet counted = session.run("SELECT COUNT(*) FROM submissions");
+  if (counted.failed()) return fail(error, "提交管理：统计总数失败", counted.error());
+
+  AdminSubmissionPage result;
+  result.total = counted.empty() ? 0 : counted.at(0).i64(0);
+  result.size = size;
+  // 服务端夹页（与 P1-5 同一条处置）：删完最后一页最后一条后 page 可能越界
+  {
+    const long long pages = (result.total + result.size - 1) / result.size;
+    const long long max_page = pages < 1 ? 1 : pages;
+    result.page = (page > max_page) ? static_cast<int>(max_page) : page;
+  }
+
+  const db::ResultSet rows = session.run(
+      "SELECT s.id, u.username, p.slug, p.title, s.language, s.status, s.verdict, s.created_at"
+      " FROM submissions s"
+      " JOIN users u ON u.id = s.user_id"
+      " JOIN problems p ON p.id = s.problem_id"
+      " ORDER BY s.id DESC LIMIT ? OFFSET ?",
+      {db::Value::from_i64(result.size),
+       db::Value::from_i64(static_cast<long long>(result.page - 1) * result.size)});
+  if (rows.failed()) return fail(error, "提交管理：取页失败", rows.error());
+
+  for (const db::Row& row : rows.rows()) {
+    AdminSubmissionRow entry;
+    entry.id = row.u64(0);
+    entry.username = row.str(1);
+    entry.problem_slug = row.str(2);
+    entry.problem_title = row.str(3);
+    entry.language = row.str(4);
+    entry.status = row.str(5);
+    entry.verdict = row.str(6);   // NULL → 空串 → 序列化为 null
+    entry.created_at = row.str(7);
+    result.list.push_back(std::move(entry));
+  }
+  *out = std::move(result);
+  return true;
+}
+
+namespace {
+
+// 删/重判共用的前置检查：存在吗？在评测中吗？（kNotFound / kBusy / kOk）
+AdminOpStatus check_submission_state(db::Session& session, unsigned long long id,
+                                     std::string* error, unsigned long long* out_user_id) {
+  const db::ResultSet row = session.run(
+      "SELECT user_id, status FROM submissions WHERE id = ?", {db::Value::from_u64(id)});
+  if (row.failed()) {
+    fail(error, "提交管理：查询提交失败", row.error());
+    return AdminOpStatus::kError;
+  }
+  if (row.empty()) return AdminOpStatus::kNotFound;
+  if (out_user_id != nullptr) *out_user_id = row.at(0).u64(0);
+  const std::string status = row.at(0).str(1);
+  // 正在评测时删/重判会与 worker 的写回撞车（写回 UPDATE 0 行 + 明细 FK 报错），
+  // 一律 1011 让调用方"等它结束再来"，而不是放行后产生一条 JE。
+  return (status == "pending" || status == "judging") ? AdminOpStatus::kBusy : AdminOpStatus::kOk;
+}
+
+}  // namespace
+
+AdminOpStatus admin_delete_submission(db::Session& session, unsigned long long id,
+                                      std::string* error) {
+  const AdminOpStatus state = check_submission_state(session, id, error, nullptr);
+  if (state != AdminOpStatus::kOk) return state;
+  const db::ResultSet removed =
+      session.run("DELETE FROM submissions WHERE id = ?", {db::Value::from_u64(id)});
+  if (removed.failed()) {
+    fail(error, "提交管理：删除提交失败", removed.error());
+    return AdminOpStatus::kError;
+  }
+  return AdminOpStatus::kOk;
+}
+
+AdminOpStatus admin_rejudge_submission(db::Session& session, unsigned long long id,
+                                       unsigned long long* out_user_id, std::string* error) {
+  unsigned long long owner = 0;
+  const AdminOpStatus state = check_submission_state(session, id, error, &owner);
+  if (state != AdminOpStatus::kOk) return state;
+
+  db::Transaction txn(session);
+  if (!txn.ok()) {
+    if (error != nullptr) *error = "重判：开启事务失败：" + session.error().format();
+    return AdminOpStatus::kError;
+  }
+  // 明细与编译诊断不 CASCADE 到 submissions（只有反方向的外键），故显式删除 ——
+  // 否则新结论会与旧行并存，详情页会看到两套逐用例结果。
+  for (const char* table : {"submission_case_results", "submission_compile_errors"}) {
+    const db::ResultSet cleared =
+        session.run(std::string("DELETE FROM ") + table + " WHERE submission_id = ?",
+                    {db::Value::from_u64(id)});
+    if (cleared.failed()) {
+      if (error != nullptr) {
+        *error = std::string("重判：清空 ") + table + " 失败：" + cleared.error().format();
+      }
+      return AdminOpStatus::kError;
+    }
+  }
+  const db::ResultSet reset = session.run(
+      "UPDATE submissions SET status = 'pending', verdict = NULL, message = NULL,"
+      " compiler_output = NULL, case_passed = NULL, case_total = NULL, total_ms = NULL,"
+      " max_mem_kb = NULL, finished_at = NULL WHERE id = ?",
+      {db::Value::from_u64(id)});
+  if (reset.failed()) {
+    if (error != nullptr) *error = "重判：重置提交失败：" + reset.error().format();
+    return AdminOpStatus::kError;
+  }
+  if (!txn.commit()) {
+    if (error != nullptr) *error = "重判：提交事务失败：" + session.error().format();
+    return AdminOpStatus::kError;
+  }
+  if (out_user_id != nullptr) *out_user_id = owner;
+  return AdminOpStatus::kOk;
+}
+
+AdminOpStatus admin_set_user_role(db::Session& session, const std::string& username,
+                                  const std::string& role, std::string* error) {
+  if (role != "admin" && role != "user") {
+    if (error != nullptr) *error = "role 只能是 admin 或 user";
+    return AdminOpStatus::kError;
+  }
+  const db::ResultSet existing =
+      session.run("SELECT role FROM users WHERE username = ?", {db::Value::from_text(username)});
+  if (existing.failed()) {
+    fail(error, "用户管理：查询用户失败", existing.error());
+    return AdminOpStatus::kError;
+  }
+  if (existing.empty()) return AdminOpStatus::kNotFound;
+  if (existing.at(0).str(0) == role) return AdminOpStatus::kOk;   // 幂等（affected_rows=0 不可作判据）
+
+  const db::ResultSet updated =
+      session.run("UPDATE users SET role = ? WHERE username = ?",
+                  {db::Value::from_text(role), db::Value::from_text(username)});
+  if (updated.failed()) {
+    fail(error, "用户管理：更新角色失败", updated.error());
+    return AdminOpStatus::kError;
+  }
+  common::log_warn(common::LogChannel::kApp,
+                   "管理端点：角色变更 " + username + " → " + role +
+                       "（注意 .env 的 OJ_ADMIN_USERNAMES 在下次启动时会重新同步，D-37）");
+  return AdminOpStatus::kOk;
+}
+
+AdminOpStatus admin_set_user_disabled(db::Session& session, const std::string& username,
+                                      bool disabled, std::string* error) {
+  const db::ResultSet existing =
+      session.run("SELECT id, disabled FROM users WHERE username = ?",
+                  {db::Value::from_text(username)});
+  if (existing.failed()) {
+    fail(error, "用户管理：查询用户失败", existing.error());
+    return AdminOpStatus::kError;
+  }
+  if (existing.empty()) return AdminOpStatus::kNotFound;
+  const unsigned long long user_id = existing.at(0).u64(0);
+  if ((existing.at(0).i64(1) != 0) == disabled) return AdminOpStatus::kOk;   // 幂等
+
+  db::Transaction txn(session);
+  if (!txn.ok()) {
+    if (error != nullptr) *error = "用户管理：开启事务失败：" + session.error().format();
+    return AdminOpStatus::kError;
+  }
+  const db::ResultSet updated =
+      session.run("UPDATE users SET disabled = ? WHERE id = ?",
+                  {db::Value::from_bool(disabled), db::Value::from_u64(user_id)});
+  if (updated.failed()) {
+    if (error != nullptr) *error = "用户管理：更新停用标记失败：" + updated.error().format();
+    return AdminOpStatus::kError;
+  }
+  if (disabled) {
+    // 立即下线：只改标记的话，已登录的会话还能继续用到过期（§6.3.2 的 7 天）。
+    const db::ResultSet sessions_killed =
+        session.run("DELETE FROM sessions WHERE user_id = ?", {db::Value::from_u64(user_id)});
+    if (sessions_killed.failed()) {
+      if (error != nullptr) {
+        *error = "用户管理：清空会话失败：" + sessions_killed.error().format();
+      }
+      return AdminOpStatus::kError;
+    }
+  }
+  if (!txn.commit()) {
+    if (error != nullptr) *error = "用户管理：提交事务失败：" + session.error().format();
+    return AdminOpStatus::kError;
+  }
+  common::log_warn(common::LogChannel::kApp,
+                   "管理端点：" + username + (disabled ? " 已停用（会话已清空）" : " 已恢复"));
+  return AdminOpStatus::kOk;
+}
+
+// ---- 序列化（阶段 2 新增结构）-------------------------------------------------
+
+std::string to_json(const std::vector<AdminProblemRow>& problems) {
+  nlohmann::json items = nlohmann::json::array();
+  for (const AdminProblemRow& row : problems) {
+    items.push_back({{"id", row.id},
+                     {"slug", row.slug},
+                     {"title", row.title},
+                     {"difficulty", row.difficulty},
+                     {"caseCount", row.case_count},
+                     {"isFeatured", row.is_featured},
+                     {"archived", row.archived},
+                     {"sortNo", row.sort_no},
+                     {"updatedAt", row.updated_at}});
+  }
+  return nlohmann::json{{"problems", std::move(items)}}.dump();
+}
+
+std::string to_json(const AdminSubmissionPage& page) {
+  nlohmann::json items = nlohmann::json::array();
+  for (const AdminSubmissionRow& row : page.list) {
+    items.push_back({{"id", row.id},
+                     {"username", row.username},
+                     {"problemSlug", row.problem_slug},
+                     {"problemTitle", row.problem_title},
+                     {"language", row.language},
+                     {"status", row.status},
+                     {"verdict", nullable_text(row.verdict)},
+                     {"createdAt", row.created_at}});
+  }
+  return nlohmann::json{{"list", std::move(items)},
+                        {"total", page.total},
+                        {"page", page.page},
+                        {"size", page.size}}
+      .dump();
 }
 
 }  // namespace web

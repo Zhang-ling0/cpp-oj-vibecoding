@@ -13,6 +13,7 @@
 
 #include "common/log.h"
 #include "db/mysql_pool.h"
+#include "judge/scheduler.h"
 
 namespace oj {
 namespace web {
@@ -152,10 +153,8 @@ bool exists_anywhere(db::Session& session, unsigned long long id, std::string* e
 // ---- judge 闸门 ---------------------------------------------------------------------
 
 bool judge_available() {
-  // T2.7 接线前恒 false：judge 调度器（judge/scheduler.*）还是空文件。
-  // 改成"调度器存活状态"时，这里是【唯一】要动的地方 —— 路由层的两个调用点
-  // （POST /api/submissions 与 .../retry）都只看这个函数，不自己判断。
-  return false;
+  // 阶段 1 接线：读调度器存活状态。POST /api/submissions 与 .../retry 都只看这个函数。
+  return judge::scheduler().alive();
 }
 
 // ---- 查询串解析（§5.3）---------------------------------------------------------------
@@ -217,11 +216,19 @@ bool load_submissions(db::Session& session, unsigned long long user_id,
                   params);
   if (counted.failed()) return fail(error, "提交列表：统计总数失败", counted.error());
 
-  // ② 当前页。按 id 倒序 = 时间倒序（id 是 AUTO_INCREMENT，且 §6.3 明确推荐时间倒序）；
-  //    idx_user_time (user_id, id DESC) 让这个排序走索引而不是 filesort。
+  SubmissionList list;
+  list.total = counted.empty() ? 0 : counted.at(0).i64(0);
+  list.size = query.size;
+  // 服务端夹页（P1-5）：删完最后一页最后一条后 page 可能 > 真实最大页，
+  // 夹回最大页（至少 1），前端跟着回显走，避免空页死局。
+  {
+    const long long pages = (list.total + list.size - 1) / list.size;
+    const long long max_page = pages < 1 ? 1 : pages;
+    list.page = (query.page > max_page) ? static_cast<int>(max_page) : query.page;
+  }
   std::vector<db::Value> page_params = params;
-  page_params.push_back(db::Value::from_i64(query.size));
-  page_params.push_back(db::Value::from_i64(static_cast<long long>(query.page - 1) * query.size));
+  page_params.push_back(db::Value::from_i64(list.size));
+  page_params.push_back(db::Value::from_i64(static_cast<long long>(list.page - 1) * list.size));
   const db::ResultSet rows = session.run(
       std::string("SELECT ") + kSubmissionColumns +
           " FROM submissions s JOIN problems p ON p.id = s.problem_id" + where +
@@ -229,10 +236,6 @@ bool load_submissions(db::Session& session, unsigned long long user_id,
       page_params);
   if (rows.failed()) return fail(error, "提交列表：取页失败", rows.error());
 
-  SubmissionList list;
-  list.total = counted.empty() ? 0 : counted.at(0).i64(0);
-  list.page = query.page;
-  list.size = query.size;
   for (const db::Row& row : rows.rows()) {
     SubmissionListItem item;
     fill_common(row, &item.id, &item.problem_slug, &item.problem_title, &item.status, &item.verdict,
@@ -409,7 +412,9 @@ bool create_submission(db::Session& session, unsigned long long user_id, const s
     return value == LookupStatus::kFound;
   };
 
-  const db::ResultSet problem = session.run("SELECT id FROM problems WHERE slug = ?",
+  // 归档题不接新提交（阶段 2 下线归档）：与"题不存在"同为 1004 ——
+  // 对提交者而言两者的处置一样（回列表），而"这题暂时下线了"不该由提交接口来解释。
+  const db::ResultSet problem = session.run("SELECT id FROM problems WHERE slug = ? AND archived = 0",
                                             {db::Value::from_text(slug)});
   if (problem.failed()) {
     fail(error, "提交：查询题目失败", problem.error());

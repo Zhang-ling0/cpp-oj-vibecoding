@@ -22,7 +22,7 @@
 //   这是该组件唯一的例外，因此它做成"由页面主动调用"而不是"自动挂载"。
 // =============================================================================
 
-import { currentUser, logout as apiLogout, get } from './api.js?v=20261015-5';
+import { currentUser, logout as apiLogout, get } from './api.js?v=20261021-1';
 
 /** HTML 转义。所有把服务端字符串插进 innerHTML 的地方都必须过它。 */
 export function escapeHtml(raw) {

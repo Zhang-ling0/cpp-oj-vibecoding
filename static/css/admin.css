@@ -1,15 +1,15 @@
 /* =============================================================================
-   运维概览页 —— SPEC §9 M4 T4.14 [D-37]
-   规格来源：§7.1「系统运行状态卡片 + 用户清单表」/ API.md §7.1 GET /api/admin/overview
+   运维台 —— SPEC §9 M4 T4.14 [D-37]（阶段 2：只读概览 → 四 tab 管理台）
+   规格来源：§7.1「系统运行状态卡片 + 用户清单表」/ §6.3.3 管理端点组
+             / API.md §7 管理端点（含阶段 2 新增的题目/提交/用户写操作）
 
    【本文件只写"页面专属"的东西】
-     §6.1 的分工是 app.css 管跨页复用的元素（按钮/表单/表格/徽标/徽章/统计块），
-     页面 css 管页面结构。本页刻意复用了 app.css 的 `.page` `.card` `.table`
-     `.stat` `.badge` `.verdict` `.notice` `.cell-center`，
-     所以这里只剩三类东西是"只有运维页才有"的：
+     §6.1 的分工是 app.css 管跨页复用的元素（按钮/表单/表格/徽标/徽章/统计块/
+     tabs/pager/notice），页面 css 管页面结构。本页复用后，剩下的都是"只有运维台才有"：
        ① 区块骨架（标题 + 说明行的 block）
        ② 运行态那一行（pill 与等宽数值）
-       ③ 用户表的列宽与数字右对齐
+       ③ 三张管理表的列宽与数字右对齐
+       ④ 题目 JSON 编辑器（页内块，不是模态框 —— 手机上模态框里编辑长 JSON 几乎不可能）
      重复定义 .btn / .table 会让"换主色"要改三个文件 —— 那正是变量化的意义所在。
    ============================================================================= */
 
@@ -103,4 +103,61 @@
 @media (max-width: 900px) {
   .sysstats { grid-template-columns: repeat(2, 1fr); }
   .runtime { grid-template-columns: 1fr; }
+}
+
+/* =============================================================================
+   阶段 2 · 四 tab 管理台
+   ============================================================================= */
+
+/* 标题行里的弹性占位：把右侧按钮推到行尾（block__title 是 flex，但没有 justify-between —
+   那会把标题文字和副标题也一起拉开）。 */
+.tabs__spacer { flex: 1; }
+
+/* ---- 题目表 --------------------------------------------------------------------- */
+.admin-problems { font-size: 13px; }
+/* slug 列等宽：它是文件名、是路由段、是编辑器里必须原样照抄的字段，一个字符的歧义都会导致保存失败 */
+.admin-problems td:first-child { font-family: var(--font-mono); white-space: nowrap; }
+.admin-problems th.num, .admin-problems td.num { text-align: right; }
+.admin-problems td:last-child { white-space: nowrap; }
+/* 归档行整体降饱和：一眼看出"这道题不在题库里"，而不是靠状态列的一个字 */
+.admin-problems tr.is-archived td { opacity: .55; }
+
+/* ---- 提交表 --------------------------------------------------------------------- */
+.admin-submissions { font-size: 13px; }
+.admin-submissions td:first-child, .admin-submissions th:first-child {
+  font-family: var(--font-mono); text-align: right;
+}
+.admin-submissions td:last-child { white-space: nowrap; }
+.admin-submissions td:nth-child(2) { white-space: nowrap; }
+
+/* ---- 用户表：操作列不换行（每行两个按钮）---------------------------------------- */
+.admin-users td:last-child { white-space: nowrap; }
+.admin-users td:last-child .btn { margin-left: var(--sp-1); }
+.admin-users tr.is-disabled td:first-child b { text-decoration: line-through; }
+
+/* ---- 题目 JSON 编辑器 ------------------------------------------------------------ */
+.peditor {
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--c-border);
+  display: grid;
+  gap: var(--sp-2);
+}
+.peditor__head { display: flex; align-items: baseline; gap: var(--sp-2); font-size: 14px; }
+.peditor__head .mono { font-size: 12px; }
+.peditor__text {
+  width: 100%;
+  min-height: 340px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  tab-size: 2;
+  resize: vertical;
+}
+.peditor__actions { display: flex; gap: var(--sp-3); justify-content: flex-end; }
+
+/* 表格与编辑器同宽时的统一缩进：编辑器出现在表格下方，视觉上属于同一页内容块 */
+@media (max-width: 900px) {
+  .admin-users th:nth-child(n+4):nth-child(-n+11),
+  .admin-users td:nth-child(n+4):nth-child(-n+11) { display: none; }
 }

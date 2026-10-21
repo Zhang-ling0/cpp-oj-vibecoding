@@ -1,35 +1,35 @@
 <!DOCTYPE html>
 <!--
-  CppOJ 运维概览页 —— SPEC §9 M4 T4.14 `[D-37]`（占位页 → 完整实现）
-  规格来源：§7.1「仅 admin：系统运行状态卡片 + 用户清单表。无任何写操作」
-            §7.3 顶栏运维入口（条件渲染由 common.js 完成）
-            §6.3.3 / API.md §7.1 GET /api/admin/overview
+  CppOJ 运维台 —— SPEC §9 M4 T4.14，阶段 2 由「严格只读概览」扩为【四 tab 管理台】
+  规格来源：§7.1 仅 admin 可见的运维区 / §7.3 顶栏运维入口（条件渲染由 common.js 完成）
+            §6.3.3 管理端点组 / API.md §7 管理端点
 
-  【本页【严格只读】，这不是"还没做写操作"，是【刻意不做】[D-37]]
-    没有表单提交、没有删除/禁用/改角色的按钮、没有 impersonation。
-    角色调整的唯一途径是改 `.env` 的 `OJ_ADMIN_USERNAMES` 后重启 ——
-    与 §2.2 既定的「运行时改题需重启」是同一套运维哲学，不引入第二套配置真源。
-    页面底部的说明文字是这一约束的**唯一呈现**：它必须存在，否则管理员
-    会在这页上找"为什么没有改角色的按钮"，找了没找到就当成缺功能。
-
-  【允许的唯一交互是"重新拉取"】
-    刷新按钮重发的是同一个 GET，不改变任何状态。
+  【D-37 变更（阶段 2 显式修改，记录见 SPEC.md §6.3.3 与 API.md §7）】
+    原 D-37：admin 页面严格只读，写操作只能改 .env 后重启。
+    本阶段变更：题目 CRUD（文件写回 + 单题同步入库）、提交删除/重判、
+    用户改角色/停用改为【页面可写】。剩余约束仍然成立：
+      · 管理员身份的真源仍是 .env 的 OJ_ADMIN_USERNAMES（启动同步）；
+      · 不能停用/降级【自己】（服务端 1011，前端也置灰）；
+      · 不删除题目（下线归档 archived=1，可恢复上架）——「不物理删」这条决策不变。
 
   【未登录 / 非管理员】
-    1002 → 跳登录页带 redirect（D-43 之外的"整页不可看"场景）
-    1003 → 显示无权限提示并**自动跳回 list.html**（T4.14 明确要求）
+    1002 → 跳登录页带 redirect；1003 → 显示无权限提示并 1.5s 后跳回 list.html（T4.14）
+    四个 tab 共用这一个闸门：首屏只请求 /api/admin/overview，拿到 0 才继续。
 
-  【样式】沿用全站浅色靛蓝主题与 app.css 的既有类，本页只补 admin.css 里
-    真正专属的那几块（状态栅格 / 运行态行 / 用户表列宽），不重复定义按钮、
-    表格、徽标 —— §6.1 的分工：app.css 管复用元素，页面 css 管页面结构。
+  【tab 内容按需懒加载】
+    概览首屏即载；题目/提交/用户在第一次点开时才发请求。管理台不是高频页面，
+    三个列表各拉一次再摆着，换来的是"点开哪个才关心哪个"的首屏。
+
+  【样式】沿用 app.css 的 .tabs .card .table .field .notice .pager，
+  admin.css 只补运维台专属的：区块骨架、运行态行、题目表列宽、JSON 编辑器。
 -->
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>运维 · CppOJ</title>
-  <link rel="stylesheet" href="/css/app.css?v=20261015-5">
-  <link rel="stylesheet" href="/css/admin.css?v=20261015-5">
+  <title>运维台 · CppOJ</title>
+  <link rel="stylesheet" href="/css/app.css?v=20261021-1">
+  <link rel="stylesheet" href="/css/admin.css?v=20261021-1">
 </head>
 <body>
   <!-- 顶栏由 common.js 的 renderTopbar() 渲染；「运维」入口按 role 条件渲染 -->
@@ -38,8 +38,8 @@
   <main class="page">
     <div class="page__head">
       <div>
-        <h1>运维概览</h1>
-        <p class="muted">严格只读 · 单一数据源 <span class="mono">GET /api/admin/overview</span></p>
+        <h1>运维台</h1>
+        <p class="muted">四 Tab：概览 · 题目 · 提交 · 用户 · <span class="mono">role=admin</span></p>
       </div>
       <button type="button" id="refresh" class="btn btn--ghost">刷新</button>
     </div>
@@ -54,48 +54,113 @@
       <p class="muted">即将返回题库…<a href="/list.html">立即返回</a></p>
     </section>
 
-    <!-- 系统状态 -->
-    <section class="card block">
+    <div class="tabs" role="tablist">
+      <button type="button" class="tabs__btn is-on" data-tab="overview" role="tab" aria-selected="true">概览</button>
+      <button type="button" class="tabs__btn" data-tab="problems" role="tab" aria-selected="false">题目</button>
+      <button type="button" class="tabs__btn" data-tab="submissions" role="tab" aria-selected="false">提交</button>
+      <button type="button" class="tabs__btn" data-tab="users" role="tab" aria-selected="false">用户</button>
+    </div>
+
+    <!-- ---- tab1 概览：系统状态（原只读页的核心，零改动）---------------------------- -->
+    <section class="card tabs__pane" id="pane-overview" role="tabpanel">
       <h2 class="block__title">系统状态</h2>
       <div id="sys-stats" class="sysstats"></div>
       <div id="sys-runtime" class="runtime"></div>
       <p id="sys-note" class="block__note"></p>
     </section>
 
-    <!-- 用户清单 -->
-    <section class="card block">
-      <h2 class="block__title">用户清单 <span id="user-count" class="muted"></span></h2>
+    <!-- ---- tab2 题目：清单 + JSON 编辑器 ---------------------------------------- -->
+    <section class="card tabs__pane" id="pane-problems" role="tabpanel" hidden>
+      <h2 class="block__title">题目 <span id="problem-count" class="muted"></span>
+        <span class="tabs__spacer"></span>
+        <button type="button" id="problem-new" class="btn btn--sm">新建题目</button>
+      </h2>
+
+      <div class="table-wrap">
+        <table class="table admin-problems">
+          <thead>
+            <tr>
+              <th>slug</th><th>标题</th><th>难度</th><th class="num">用例</th>
+              <th>精选</th><th>状态</th><th>更新时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="problems"></tbody>
+        </table>
+      </div>
+
+      <!-- 编辑器：不是模态框而是页内块 —— 手机上模态框里的长 JSON 几乎没法编辑 -->
+      <div id="problem-editor" class="peditor" hidden>
+        <div class="peditor__head">
+          <b id="peditor-title">新建题目</b>
+          <span class="muted mono" id="peditor-slug"></span>
+        </div>
+        <textarea id="peditor-json" class="field__input peditor__text" spellcheck="false"
+                  placeholder='{"slug":"two-sum","title":"…"}'></textarea>
+        <p id="peditor-error" class="field__error"></p>
+        <div class="peditor__actions">
+          <button type="button" id="peditor-cancel" class="btn btn--ghost">取消</button>
+          <button type="button" id="peditor-save" class="btn">保存并同步</button>
+        </div>
+        <p class="block__note">
+          题目 JSON 是<b>唯一真源</b>（D-30）：保存会写
+          <span class="mono">problems/&lt;slug&gt;.json</span>，校验通过后立刻同步进 DB 与判题缓存，
+          <b>不需要重启服务</b>。改名（slug 变化）请新建 + 下线旧题，直接改 slug 会以「与路径不一致」被拒。
+        </p>
+      </div>
+    </section>
+
+    <!-- ---- tab3 提交：全站列表 + 删除 / 重判 ------------------------------------- -->
+    <section class="card tabs__pane" id="pane-submissions" role="tabpanel" hidden>
+      <h2 class="block__title">提交 <span id="submission-count" class="muted"></span></h2>
+      <div class="table-wrap">
+        <table class="table admin-submissions">
+          <thead>
+            <tr>
+              <th class="num">#</th><th>用户</th><th>题目</th><th>语言</th>
+              <th>状态</th><th>结论</th><th>提交时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="submissions"></tbody>
+        </table>
+      </div>
+      <div id="submission-pager" class="pager"></div>
+      <p class="block__note">
+        <b>删除</b>会连带删掉该提交的逐用例结果与编译诊断（外键级联），不可恢复；
+        <b>重判</b>把这条记录重置回 pending 重新入队 —— 按 [D-58] 的同一条原则，
+        它改的是原记录本身（管理员要的是"这条结论错了"，不是再攒一条）。
+        正在评测中的提交（judging）两者都会被拒（1011）。
+      </p>
+    </section>
+
+    <!-- ---- tab4 用户：改角色 / 停用 ---------------------------------------------- -->
+    <section class="card tabs__pane" id="pane-users" role="tabpanel" hidden>
+      <h2 class="block__title">用户 <span id="user-count" class="muted"></span></h2>
       <div class="table-wrap">
         <table class="table admin-users">
           <thead>
             <tr>
-              <th>用户名</th>
-              <th>角色</th>
-              <th>注册时间</th>
-              <th class="num">提交</th>
-              <th class="num">AC</th>
-              <th class="num">AC 率</th>
-              <th class="num">已通过</th>
-              <th class="num">尝试过</th>
-              <th class="num">收藏</th>
-              <th>最近提交</th>
-              <th>最近结论</th>
+              <th>用户名</th><th>角色</th><th>状态</th><th>注册时间</th>
+              <th class="num">提交</th><th class="num">AC</th><th class="num">AC 率</th>
+              <th class="num">已通过</th><th class="num">尝试过</th><th class="num">收藏</th>
+              <th>最近提交</th><th>最近结论</th><th>操作</th>
             </tr>
           </thead>
           <tbody id="users"></tbody>
         </table>
       </div>
       <p class="block__note">
-        <b>本页不提供任何写操作</b>：没有禁用 / 删除 / 改角色 / impersonation。
-        角色是 <span class="mono">.env</span> 里 <span class="mono">OJ_ADMIN_USERNAMES</span>
-        的声明式名单（<span class="mono">D-37</span>），调整后需重启服务；
-        这样"配置"与"页面"不会各自成为一条能互相覆盖的真源。
+        <b>角色</b>的声明式真源仍是 <span class="mono">.env</span> 的
+        <span class="mono">OJ_ADMIN_USERNAMES</span>（启动时同步，D-37 未变）——
+        页面上的改角色会在<b>下次启动被覆盖回配置</b>，长期改动请改配置；
+        这里提供它是为了"临时拉个人进来处理一条提交"这类一次性操作。
+        <b>停用</b>会立即清空该用户全部会话（正在使用的登录当场失效）并拒绝其再次登录。
+        不能改自己的角色，也不能停用自己（服务端 1011，前端置灰）。
       </p>
     </section>
   </main>
 
   <script type="module">
-    import { initAdminPage } from '/js/admin.js?v=20261015-5';
+    import { initAdminPage } from '/js/admin.js?v=20261021-1';
     initAdminPage(document);
   </script>
 </body>

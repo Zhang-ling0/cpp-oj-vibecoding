@@ -559,5 +559,41 @@ void clear_cache() {
   cache_slot() = std::make_shared<const Cache>();
 }
 
+bool sync_one(const model::ProblemBundle& problem, std::string* error) {
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    if (error != nullptr) *error = "单题同步：连接池未就绪，取不到租约";
+    return false;
+  }
+  const SyncOutcome outcome = sync_problem(lease.session(), problem);
+  if (!outcome.ok) {
+    const std::string detail = "单题同步（slug=" + problem.slug + "）失败：" + outcome.error;
+    common::log_error(common::LogChannel::kApp, detail);
+    if (error != nullptr) *error = detail;
+    return false;
+  }
+
+  model::ProblemBundle stored = problem;
+  stored.id = outcome.id;
+  // 就地替换：读侧拿的是 shared_ptr 快照，这里发布一份新快照 ——
+  // 正是 loader.h【缓存为什么是 shared_ptr】那条不变量的运行期用法（无悬空态）。
+  std::lock_guard<std::mutex> guard(cache_mutex());
+  Cache building = *cache_slot();
+  bool replaced = false;
+  for (model::ProblemBundle& item : building) {
+    if (item.slug == stored.slug) {
+      item = std::move(stored);
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) building.push_back(std::move(stored));
+  cache_slot() = std::make_shared<const Cache>(std::move(building));
+  common::log_info(common::LogChannel::kApp,
+                   "题库单题同步完成：slug=" + problem.slug + "（用例 " +
+                       std::to_string(outcome.cases) + "，无需重启）");
+  return true;
+}
+
 }  // namespace problem
 }  // namespace oj

@@ -56,7 +56,7 @@ function buildQuery(query) {
 
 /**
  * 发一个请求并解析统一包络。
- * @param {'GET'|'POST'|'DELETE'} method
+ * @param {'GET'|'POST'|'PUT'|'DELETE'} method
  * @param {string} path 以 / 开头的端点路径
  * @param {{body?: object, query?: object}} [options]
  * @returns {Promise<{code:number, message:string, data:object}>}
@@ -112,6 +112,7 @@ export async function request(method, path, options = {}) {
 
 export const get = (path, query) => request('GET', path, { query });
 export const post = (path, body) => request('POST', path, { body });
+export const put = (path, body) => request('PUT', path, { body });   // 阶段 2：管理端改题目
 export const del = (path, body) => request('DELETE', path, { body });
 
 /**

@@ -1031,10 +1031,11 @@ TEST_F(ProblemApiDbTest, PaginationCoversEveryRowExactlyOnce) {
   std::sort(slugs.begin(), slugs.end());
   EXPECT_EQ(std::adjacent_find(slugs.begin(), slugs.end()), slugs.end()) << "翻页出现重复";
 
-  query.page = 99;   // 越界页：空列表但 total 不变（前端据此知道该回第几页）
+  query.page = 99;   // 越界页：服务端夹回真实最大页（P1-6），前端跟着回显走
   const ProblemList beyond = list_for(anonymous, query);
-  EXPECT_TRUE(beyond.list.empty());
+  EXPECT_EQ(beyond.page, 4);
   EXPECT_EQ(beyond.total, 4);
+  ASSERT_EQ(beyond.list.size(), 1u);   // 夹页后返回末页内容，不再空页死局
 }
 
 TEST_F(ProblemApiDbTest, SortModesAreOrderedAndDeterministic) {

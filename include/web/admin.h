@@ -134,6 +134,7 @@ struct AdminUserRow {
   long long favorites = 0;
   std::string last_submit_at;   // 无提交时为空串（序列化为 JSON null）
   std::string last_verdict;     // 无提交时为空串；最新一条还没出结论时也是空串（verdict 可为 NULL）
+  bool disabled = false;        // 阶段 2：停用用户（登录被拒 + 存量会话已清空）
 };
 
 struct Overview {
@@ -162,6 +163,110 @@ bool build_overview(db::Session& session, const JudgeRuntimeStatus& status,
 // 空串的可空字段序列化为 JSON null 而不是 ""——两者在前端的含义不同
 //（"没有提交" 与 "提交了但结论未知"）。
 std::string to_json(const Overview& overview);
+
+// =============================================================================
+// 阶段 2 · 管理端写操作（【D-37 变更】：admin 由「严格只读」改为「可写」）
+//
+// 本段【显式覆盖】上面文件头「严格只读，且刻意不做题库增删改」的论证 ——
+// 那段论证在只读前提下依然成立（写回 JSON 与 §5.2 的边界冲突、DB 不当第二真源），
+// 本轮的解法是**不推翻它的结论、只替换它的实现前提**：
+//   · 文件仍是唯一真源（D-30）：管理端写的不是 DB，是 problems/<slug>.json；
+//     DB 只是写完文件后由 problem::sync_one 重放的一份投影，与启动时 load_all 同一条路径；
+//   · 仍然没有"DB 改题"的口子：本段没有一条 UPDATE problems 业务列的语句，
+//     唯一的例外是 archived（归档标记）——它不是题面内容，文件里没有对应字段。
+//   · 删题依旧不做：归档（archived=1）让题目对用户不可见，problems 行与用户历史零风险，
+//     正是 §3 决策表「下线归档，不物理删」的落法（loader 的规避逻辑因此无需改动）。
+// 变更已记入 SPEC.md §6.3.3 与 API.md §7（TODO 2.12）。
+// =============================================================================
+
+// ---- 题目 --------------------------------------------------------------------
+
+struct AdminProblemRow {
+  int id = 0;
+  std::string slug;
+  std::string title;
+  std::string difficulty;
+  long long case_count = 0;
+  bool is_featured = false;
+  bool archived = false;
+  int sort_no = 0;
+  std::string updated_at;
+};
+
+// 文件读写的四态 + 成功。分开报是因为它们映射到【不同的业务码】
+// （1001 / 1005 / 1004 / 1008），揉成 bool 会把"校验不过"和"磁盘坏了"变成同一句提示。
+enum class ProblemWriteStatus {
+  kOk,
+  kInvalid,   // json_schema 校验不通过 → 1001（reason = 逐条问题）
+  kConflict,  // 新建时 problems/<slug>.json 已存在 → 1005
+  kMissing,   // 编辑/读取时文件不存在 → 1004
+  kIo         // 文件读写或写库失败 → 1008（已记 app.log）
+};
+
+bool load_admin_problems(db::Session& session, std::vector<AdminProblemRow>* out,
+                         std::string* error);
+// 读 problems/<slug>.json 全文（编辑回显用；内容原样返回，不做二次格式化）。
+ProblemWriteStatus read_problem_json(const std::string& slug, std::string* out,
+                                     std::string* error);
+// 写回单题 JSON → 校验 → 落盘（临时文件 + rename 原子替换）→ sync_one 入库 + 刷缓存。
+// require_existing=false 是「新建」（文件必须不存在），true 是「编辑」（必须存在）。
+// 校验不过时磁盘文件【原样不动】；写库失败时回滚到写入前的内容（新建则删除文件）。
+ProblemWriteStatus write_problem_json(const std::string& slug, const std::string& text,
+                                      bool require_existing, std::string* error);
+// 下线归档（不物理删）。found=false → 1004。
+bool set_problem_archived(db::Session& session, const std::string& slug, bool archived,
+                          bool* found, std::string* error);
+
+// ---- 提交管理 -----------------------------------------------------------------
+
+struct AdminSubmissionRow {
+  unsigned long long id = 0;
+  std::string username;
+  std::string problem_slug;
+  std::string problem_title;
+  std::string language;
+  std::string status;
+  std::string verdict;     // 空串 = NULL（还没出结论）
+  std::string created_at;
+};
+
+struct AdminSubmissionPage {
+  long long total = 0;
+  int page = 1;
+  int size = 20;
+  std::vector<AdminSubmissionRow> list;
+};
+
+// 写操作的三态。kBusy 专指「这条提交正在评测」（pending/judging）——
+// 此时删/重判都会与判题 worker 的写回撞车，回 1011 而不是让它俩去抢。
+enum class AdminOpStatus {
+  kOk,
+  kNotFound,  // → 1004
+  kBusy,      // → 1011
+  kError      // → 1008（已记 app.log）
+};
+
+bool load_admin_submissions(db::Session& session, int page, int size,
+                            AdminSubmissionPage* out, std::string* error);
+AdminOpStatus admin_delete_submission(db::Session& session, unsigned long long id,
+                                      std::string* error);
+// 重判 = 把这一行重置回 pending 并清空旧明细（明细/诊断由外键 CASCADE 之外的显式
+// DELETE 处理：它们不 CASCADE 到 submissions）。返回该提交的 user_id 供路由入队。
+AdminOpStatus admin_rejudge_submission(db::Session& session, unsigned long long id,
+                                       unsigned long long* out_user_id, std::string* error);
+
+// ---- 用户管理 -----------------------------------------------------------------
+
+// role 仅接受 'admin' / 'user'（路由层先做白名单，这里再兜一次 SQL 层面的值域）。
+AdminOpStatus admin_set_user_role(db::Session& session, const std::string& username,
+                                  const std::string& role, std::string* error);
+// 停用时连带清空该用户全部会话（立即下线）；重新启用不恢复会话（重新登录即可）。
+AdminOpStatus admin_set_user_disabled(db::Session& session, const std::string& username,
+                                      bool disabled, std::string* error);
+
+// ---- 新增结构的序列化（data 块，camelCase，与既有 to_json 同一约定）------------
+std::string to_json(const std::vector<AdminProblemRow>& problems);
+std::string to_json(const AdminSubmissionPage& page);
 
 }  // namespace web
 }  // namespace oj

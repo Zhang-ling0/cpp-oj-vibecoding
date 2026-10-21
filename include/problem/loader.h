@@ -103,6 +103,12 @@ struct LoadOptions {
 // 全程记日志（app 通道）：每道被跳过的题一条 ERROR + 末尾一条汇总（§5.6.1）。
 LoadReport load_all(const LoadOptions& options = LoadOptions{});
 
+// 单题同步（阶段 2 · 管理端写回路径）：把一道已通过 json_schema 校验的题写库，
+// 并【就地】替换/追加只读缓存里的同 slug 条目 —— 因此写回后立即生效，不需重启。
+// 与 load_all 的差别只有范围（一题 vs 全库）与缓存发布（替换 vs 重建）。
+// JSON 的读写与校验归 web/admin（D-30：文件是唯一真源），本函数只管「DB + 缓存」这一半。
+bool sync_one(const model::ProblemBundle& problem, std::string* error);
+
 // ---- 进程内只读缓存（供 judge worker 使用，§2.1-A「取题 + 读用例(缓存)」）--------
 using Cache = std::vector<model::ProblemBundle>;
 using CachePtr = std::shared_ptr<const Cache>;

@@ -17,8 +17,8 @@
 //   注意：题库列表照常渲染（GET /api/problems 的 Auth=否，D-43）。
 // =============================================================================
 
-import { get } from './api.js?v=20261015-5';
-import { escapeHtml, formatLocalTime, roleBadgeHtml } from './common.js?v=20261015-5';
+import { get } from './api.js?v=20261021-1';
+import { escapeHtml, formatLocalTime, roleBadgeHtml } from './common.js?v=20261021-1';
 
 const DIFF_TEXT = { easy: '简单', medium: '中等', hard: '困难' };
 const VERDICT_TEXT = {
@@ -109,7 +109,7 @@ export async function renderOverviewBar(mount, user = null) {
 
   mount.innerHTML =
     '<div class="overview__head">' +
-      `<div class="overview__hello">你好，${escapeHtml(user.username || '')}${roleBadgeHtml(user)}</div>` +
+      `<div class="overview__hello">你好，${escapeHtml(user?.username ?? '')}${roleBadgeHtml(user)}</div>` +
       '<div class="overview__stats">' +
         stat(`${solved}/${total}`, '已通过') +
         stat(totals.attempted || 0, '尝试中') +

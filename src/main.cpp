@@ -9,12 +9,9 @@
 //   ✅ 5. 题库同步               —— 读 problems/*.json → 校验 → 入库 → 灌只读缓存（T1.2）
 //   ✅ 6. 工作区扫残             —— 清 /tmp/oj-judge/* 残留，必须排在 judge 之前（T2.9）
 //   ✅ 7. 过期会话回收           —— 启动时一次（§6.3.2 / T3.10）
-//   ✅ 8. HTTP 起服务并 listen   —— 静态挂载 + §6.3 的全部端点（T0.5 / T3.5 + V2.7 接线）
-//   ⏳ 9. 角色同步（T3.11）→ 10. judge 调度器（T2.7）
-//   后两步还没接线：**role 目前就是库里的既有值**（改 .env 的 OJ_ADMIN_USERNAMES 不生效，
-//   启动回显里已打这句提示）；judge 未接线时 POST /api/submissions 与 /retry 稳定回
-//   1009 / 503 且不落库（见 API.md §5.1）。除此之外全部端点已可端到端跑通，
-//   curl 验收见 tests/run_tests.sh。
+//   ✅ 8. 角色同步               —— T3.11（.env 名单 → users.role）
+//   ✅ 9. 判题调度器             —— T2.7（队列 + workers + 闸门）
+//   ✅ 10. HTTP 起服务并 listen  —— 静态挂载 + §6.3 的全部端点（T0.5 / T3.5 + V2.7 接线）
 //   ⚠️ 第 8 步把本进程变成【常驻阻塞】——在此之前 `make run` 跑完就退出，
 //      那正是 §9 T0.5 验收里"浏览器访问 localhost:8080 看到页面"的前提。
 //
@@ -54,6 +51,7 @@
 #include "common/config.h"
 #include "common/log.h"
 #include "db/mysql_pool.h"
+#include "judge/scheduler.h"
 #include "judge/workspace.h"
 #include "problem/loader.h"
 #include "web/routes.h"
@@ -191,6 +189,61 @@ bool apply_schema(std::string* error) {
   return true;
 }
 
+// 阶段 2 的新增列迁移（problems.archived / users.disabled）。
+// CREATE TABLE IF NOT EXISTS 对【已存在的表】什么都不做 —— 01-schema.sql 加了列之后，
+// 老库不会自动长出这一列，于是"新代码已在跑、老库还在按旧结构存"会在第一次读该列时报
+// unknown column（且报错点离根因极远）。故建表后再补一次幂等 ALTER：有则跳过，无则加。
+// 与建表同一套"可重复执行"的语义，不引入第二个迁移文件。
+bool ensure_columns(std::string* error) {
+  struct ColumnSpec {
+    const char* table;
+    const char* column;
+    const char* ddl;
+  };
+  static const ColumnSpec kColumns[] = {
+      {"users", "disabled",
+       "ALTER TABLE users ADD COLUMN disabled TINYINT(1) NOT NULL DEFAULT 0"},
+      {"problems", "archived",
+       "ALTER TABLE problems ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0"},
+  };
+
+  oj::db::Lease lease = oj::db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    *error = "补列：连接池未就绪，取不到租约（见上一条 ERROR）";
+    return false;
+  }
+  std::vector<std::string> added;
+  for (const ColumnSpec& spec : kColumns) {
+    const oj::db::ResultSet existing = lease->run(
+        "SELECT COUNT(*) FROM information_schema.columns"
+        " WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+        {oj::db::Value::from_text(spec.table), oj::db::Value::from_text(spec.column)});
+    if (existing.failed()) {
+      *error = std::string("补列：查 information_schema（") + spec.table + "." + spec.column +
+               "）失败：" + existing.error().format();
+      return false;
+    }
+    if (!existing.empty() && existing.at(0).i64(0) > 0) continue;   // 已存在（幂等）
+    const oj::db::ResultSet altered = lease->run(spec.ddl);
+    if (altered.failed()) {
+      *error = std::string("补列：执行 ALTER（") + spec.table + "." + spec.column +
+               "）失败：" + altered.error().format();
+      return false;
+    }
+    added.push_back(std::string(spec.table) + "." + spec.column);
+  }
+  if (!added.empty()) {
+    std::string names;
+    for (const std::string& name : added) {
+      if (!names.empty()) names += "、";
+      names += name;
+    }
+    oj::common::log_info(oj::common::LogChannel::kApp,
+                         "已为老库补上阶段 2 新增列：" + names);
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -246,6 +299,16 @@ int main(int argc, char** argv) {
   if (!apply_schema(&schema_error)) {
     std::fprintf(stderr, "[oj] %s\n", schema_error.c_str());
     oj::common::log_error(oj::common::LogChannel::kApp, "建表失败：" + schema_error);
+    oj::db::Pool::instance().shutdown();
+    oj::common::shutdown_logging();
+    return 1;
+  }
+
+  // ---- 4b. 阶段 2 新增列的幂等补列（老库长出 problems.archived / users.disabled）----
+  std::string column_error;
+  if (!ensure_columns(&column_error)) {
+    std::fprintf(stderr, "[oj] %s\n", column_error.c_str());
+    oj::common::log_error(oj::common::LogChannel::kApp, "补列失败：" + column_error);
     oj::db::Pool::instance().shutdown();
     oj::common::shutdown_logging();
     return 1;
@@ -329,28 +392,56 @@ int main(int argc, char** argv) {
               oj::judge::workspace_root().c_str());
   std::printf("[oj] 判题缓存已就绪：%zu 题；已回收过期会话 %ld 条\n",
               oj::problem::cache_size(), purged_sessions);
-  // ⚠️ 角色同步（T3.11）尚未接线，因此【此刻 role 就是库里的既有值】：
-  //   改 .env 的 OJ_ADMIN_USERNAMES 并重启【不会】生效，要等 T3.11 落地。
-  //   这句话是刻意打出来的 —— 运维改完 .env 发现没生效而查不到任何提示，
-  //   是比"功能没做"更难查的一类问题。
   const std::string admin_echo =
       oj::common::config().admin_usernames_configured
-          ? "共 " + std::to_string(oj::common::config().admin_usernames.size()) +
-                " 个（角色同步 T3.11 尚未接线，改 .env 暂不生效）"
+          ? "共 " + std::to_string(oj::common::config().admin_usernames.size()) + " 个（T3.11 已接线，启动时同步）"
           : "未设置（保持库中既有 role 不变）";
   std::printf("[oj] 注册开关 OJ_ALLOW_REGISTER=%s；管理员名单%s\n",
               oj::common::config().allow_register ? "1（开放注册）" : "0（已关闭注册）",
               admin_echo.c_str());
-
-  oj::common::log_text(oj::common::LogChannel::kApp, oj::common::LogLevel::kInfo,
-                       config_echo);
+  oj::common::log_text(oj::common::LogChannel::kApp, oj::common::LogLevel::kInfo, config_echo);
   oj::common::log_info(oj::common::LogChannel::kApp,
                        "数据库就绪 " + oj::db::Pool::instance().describe());
   oj::common::log_info(oj::common::LogChannel::kApp,
                        load_report.summary() + "；判题缓存 " +
                            std::to_string(oj::problem::cache_size()) + " 题");
-  oj::common::log_info(oj::common::LogChannel::kApp,
-                       "启动顺序推进到「DB 就绪 + 建表 + 题库同步 + 工作区扫残 + 会话回收 + HTTP 就绪」");
+  // ---- 角色同步 T3.11 / §6.3.1 ----
+  // D-37：OJ_ADMIN_USERNAMES 是 role 唯一真源。configured=false 完全跳过（零变化）。
+  if (oj::common::config().admin_usernames_configured) {
+    oj::db::Lease role_lease = oj::db::Pool::instance().acquire();
+    if (role_lease.valid()) {
+      // 先全部降为 user，再按名单提权（名单外降权是 D-37 的语义）
+      role_lease->run("UPDATE users SET role='user' WHERE role='admin'");
+      std::size_t promoted = 0;
+      for (const std::string& name : oj::common::config().admin_usernames) {
+        const oj::db::ResultSet r = role_lease->run(
+            "UPDATE users SET role='admin' WHERE username = ?",
+            {oj::db::Value::from_text(name)});
+        if (!r.failed() && r.affected_rows() > 0) {
+          ++promoted;
+        } else if (!r.failed()) {
+          std::printf("[oj] 警告：OJ_ADMIN_USERNAMES 中的 %s 不存在，已忽略\n", name.c_str());
+          oj::common::log_warn(oj::common::LogChannel::kApp,
+                               "角色同步：用户名不存在 " + name);
+        }
+      }
+      std::printf("[oj] 角色同步完成：提权 %zu 人（T3.11）\n", promoted);
+      oj::common::log_info(oj::common::LogChannel::kJudge,
+                           "角色同步完成：提权 " + std::to_string(promoted) + " 人");
+    }
+  }
+
+  // ---- 判题调度器（T2.7 / 阶段 1）----
+  // 必须在工作区扫残之后、HTTP listen 之前启动（§2.3）。
+  if (!oj::judge::scheduler().start()) {
+    std::fprintf(stderr, "[oj] 判题调度器启动失败，拒绝启动\n");
+    oj::common::log_error(oj::common::LogChannel::kJudge, "调度器启动失败");
+    oj::db::Pool::instance().shutdown();
+    oj::common::shutdown_logging();
+    return 1;
+  }
+  std::printf("[oj] 判题调度器已启动（workers=%d gate=%d）\n",
+              oj::common::config().judge_workers, oj::common::config().judge_global_gate);
 
   // ---- 8. HTTP 起服务并 listen（T0.5 / T3.5 认证组）----
   // 排在最后：listen() 之前的所有失败都以"拒绝启动"的方式响亮失败，
@@ -370,10 +461,14 @@ int main(int argc, char** argv) {
   server_options.listen_host = oj::common::config().listen_host;
   server_options.listen_port = oj::common::config().listen_port;
 
-  std::printf("[oj] HTTP 监听 http://%s:%d（静态根 %s，线程池 8）；"
+  // 线程池数必须打【config 的值】而不是写死：阶段 2 之后 OJ_HTTP_THREADS 是运行期生效的
+  // （listen_and_serve 用它建固定 ThreadPool），dump_config 与这行启动日志若各说各话，
+  // 排查"改了 .env 为什么没生效"时会先被这行误导。
+  std::printf("[oj] HTTP 监听 http://%s:%d（静态根 %s，线程池 %d）；"
               "Ctrl-C 停止。登录页 http://127.0.0.1:%d/login.html\n",
               server_options.listen_host.c_str(), server_options.listen_port,
-              server_options.static_dir.c_str(), server_options.listen_port);
+              server_options.static_dir.c_str(), oj::common::config().http_threads,
+              server_options.listen_port);
 
   if (!oj::web::listen_and_serve(server_options)) {
     oj::common::log_error(oj::common::LogChannel::kApp,
@@ -384,6 +479,7 @@ int main(int argc, char** argv) {
                  "[oj] HTTP 服务未能监听 %s:%d —— 请检查端口是否被占用"
                  "（OJ_HTTP_PORT 可改端口，见 .env）\n",
                  server_options.listen_host.c_str(), server_options.listen_port);
+    oj::judge::scheduler().stop();
     oj::db::Pool::instance().shutdown();
     oj::common::shutdown_logging();
     return 1;
@@ -392,6 +488,7 @@ int main(int argc, char** argv) {
   // listen 返回 = 收到 SIGINT/SIGTERM（唯一能走到这里的路径，routes.h 已说明）。
   oj::common::log_info(oj::common::LogChannel::kApp, "收到停止信号，HTTP 已停止接收新请求");
   std::printf("\n[oj] 已停止。\n");
+  oj::judge::scheduler().stop();
   oj::db::Pool::instance().shutdown();
   oj::common::shutdown_logging();
   return 0;

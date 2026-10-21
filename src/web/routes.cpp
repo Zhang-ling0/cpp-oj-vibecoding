@@ -8,8 +8,10 @@
 // 失败码由谁给）大到一张表反而会多出一层与业务层重复的映射。
 // =============================================================================
 
-// 必须排在 httplib.h 之前：线程池大小是 include 期展开的宏，不是运行期配置。
-// §2.3 的 N=8。理由见 routes.h【线程池大小为什么写死 8】。
+// 必须排在 httplib.h 之前：这是 httplib 默认线程池的【编译期】兜底值。
+// ⚠️ 它不是生效值 —— OJ_HTTP_THREADS 由 listen_and_serve 用运行期 new_task_queue
+// 覆盖（P0-2 的修法）。留着它只是让"忘了覆盖"时的行为仍是确定的 8，而不是
+// httplib 自己那套按 CPU 数推导的动态池（基数 × 4，2 核机上会虚到 32 线程）。
 #define CPPHTTPLIB_THREAD_POOL_COUNT 8
 
 #include "web/routes.h"
@@ -29,9 +31,11 @@
 #include "common/log.h"
 #include "common/response.h"
 #include "db/mysql_pool.h"
+#include "judge/scheduler.h"
 #include "web/admin.h"
 #include "web/auth_api.h"
 #include "web/problem_api.h"
+#include "web/ratelimit.h"
 #include "web/session.h"
 #include "web/submission_api.h"
 #include "web/user_api.h"
@@ -83,6 +87,14 @@ std::string field_text(const nlohmann::json& body, const char* key) {
   const auto it = body.find(key);
   if (it == body.end() || !it->is_string()) return std::string();
   return it->get<std::string>();
+}
+
+// 取布尔字段；缺键 / 非布尔一律 nullopt（调用方据此回 1001，而不是替调用方猜默认值
+// —— 归档/停用这类"反着猜一次就出事"的字段必须由调用方显式决定）。
+std::optional<bool> field_bool(const nlohmann::json& body, const char* key) {
+  const auto it = body.find(key);
+  if (it == body.end() || !it->is_boolean()) return std::nullopt;
+  return it->get<bool>();
 }
 
 // 失败包络 + （服务端原因时）一条 app.log。
@@ -555,6 +567,14 @@ void handle_submission_create(const httplib::Request& req, httplib::Response& re
   }
   std::string language = field_text(body, "language");
   if (language.empty()) language = "cpp";   // §5.1：默认 "cpp"（首版只支持 C++）
+  // P1-10 白名单：非 cpp 一律 1001。缺了这道闸，language=python 会原样落库，
+  // 判题器按 C++ 编译它 —— 用户拿到的是一条与自己代码毫无关系的 CE。
+  if (language != "cpp") {
+    send(common::fail(common::ApiError::kInvalidArgument, "language",
+                      "当前版本只支持 cpp（收到：" + language + "）"),
+         res);
+    return;
+  }
   const std::string code = field_text(body, "code");
   if (code.empty()) {
     send(common::fail(common::ApiError::kInvalidArgument, "code", "代码不能为空"), res);
@@ -571,9 +591,42 @@ void handle_submission_create(const httplib::Request& req, httplib::Response& re
   AuthUser user;
   if (!require_viewer(req, res, &user)) return;
 
+  // 1006 滑动窗口配额：纯内存，刻意放在取 DB 租约【之前】——
+  // 最热的那类请求（连点提交）应当在碰全局 DB 互斥（D-21）之前就被拦下。
+  int retry_after = 0;
+  if (!rate_allow(user.user_id, &retry_after)) {
+    const common::Config& cfg = common::config();
+    send(common::fail(common::ApiError::kTooManyRequests, "",
+                      "提交过于频繁：单用户每 " + std::to_string(cfg.rate_window_seconds) +
+                          "s 最多 " + std::to_string(cfg.rate_max_submits_per_window) +
+                          " 次提交，请 " + std::to_string(retry_after) + "s 后再试"),
+         res);
+    return;
+  }
+
   db::Lease lease = db::Pool::instance().acquire();
   if (!lease.valid()) {
     send_pool_unavailable(req, res);
+    return;
+  }
+
+  // 1007 单用户并发评测闸：pending + judging 已达 OJ_JUDGE_USER_GATE 时拒之门外。
+  // 与调度器内部的 user_slot 是两道闸：那一道决定"何时能开跑"（排队），
+  // 这一道决定"要不要收下这条提交"（不落库）。检查点必须在建行之前，理由同 1009。
+  long long active = 0;
+  std::string gate_error;
+  const GateResult gate =
+      user_gate_check(lease.session(), user.user_id, &active, &gate_error);
+  if (gate == GateResult::kError) {
+    send(common::fail(common::ApiError::kInternalError, "", gate_error), res);
+    return;
+  }
+  if (gate == GateResult::kLimited) {
+    send(common::fail(common::ApiError::kQuotaExceeded, "",
+                      "你已有 " + std::to_string(active) + " 个评测在进行中（单用户上限 " +
+                          std::to_string(common::config().judge_user_gate) +
+                          " 个），请等它们结束"),
+         res);
     return;
   }
 
@@ -596,6 +649,8 @@ void handle_submission_create(const httplib::Request& req, httplib::Response& re
     send(common::fail(common::ApiError::kJudgeUnavailable), res);
     return;
   }
+  // 建行成功后入队（§5.1 时间线：INSERT pending → push 队列）
+  judge::scheduler().enqueue(created.submission_id, user.user_id);
   send(common::created(nlohmann::json::parse(to_json(created))), res);
 }
 
@@ -793,6 +848,7 @@ void handle_submission_retry(const httplib::Request& req, httplib::Response& res
     send(common::fail(common::ApiError::kJudgeUnavailable), res);
     return;
   }
+  judge::scheduler().enqueue(new_id, user.user_id);
 
   nlohmann::json data;
   data["newSubmissionId"] = new_id;
@@ -843,32 +899,392 @@ void handle_overview(const httplib::Request& req, httplib::Response& res) {
 
 // ---- 管理（§7）-------------------------------------------------------------------------
 
-// GET /api/admin/overview → 只读管理面板。先判登录（1002）再判角色（1003），
-// 顺序由 admin::require_admin 保证，不可颠倒（§7.1）。
-//
-// judge 快照走 unwired_status_provider()：judge 未接线时如实报 false + 三个 0，
-// 运维必须一眼看出判题没起来，而不是"假装一切正常"。
-void handle_admin_overview(const httplib::Request& req, httplib::Response& res) {
+// 全部 /api/admin/* 的统一入口守卫：先登录（1002）再角色（1003），顺序由
+// require_admin 保证（§6.3.3，不可颠倒）。概览端点与阶段 2 的写端点共用它，
+// 让"admin 端点漏了守卫"这种事在结构上不可能发生 —— 每个处理器第一行就是它。
+bool require_admin_viewer(const httplib::Request& req, httplib::Response& res, AuthUser* out) {
   AuthUser user;
-  if (!require_viewer(req, res, &user)) return;
-
+  if (!require_viewer(req, res, &user)) return false;
   const GuardResult guard = require_admin(std::optional<AuthUser>(user));
   if (guard == GuardResult::kUnauthenticated) {
     send(common::fail(common::ApiError::kUnauthenticated), res);
-    return;
+    return false;
   }
   if (guard == GuardResult::kForbidden) {
     send(common::fail(common::ApiError::kForbidden), res);
-    return;
+    return false;
   }
+  *out = user;
+  return true;
+}
+
+// GET /api/admin/overview → 只读管理面板。先判登录（1002）再判角色（1003），
+// 顺序由 admin::require_admin 保证，不可颠倒（§7.1）。
+//
+// judge 快照走真实调度器（阶段 1 接线）：queueLength/activeJudges/judgeAlive 来自进程内状态。
+void handle_admin_overview(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
 
   Overview overview;
   std::string error;
-  if (!build_overview(unwired_status_provider(), &overview, &error)) {
+  const StatusProvider provider = []() {
+    const judge::SchedulerStatus st = judge::scheduler().status();
+    return JudgeRuntimeStatus{st.queue_length, st.active_judges, st.judge_alive};
+  };
+  if (!build_overview(provider, &overview, &error)) {
     send(common::fail(common::ApiError::kInternalError), res);
     return;
   }
   send(common::ok(nlohmann::json::parse(to_json(overview))), res);
+}
+
+// ---- 管理写操作（阶段 2 · D-37 变更，见 admin.h 对应段落）------------------------------
+
+// 业务层结果 → 包络。返回 true = 业务层成功、由调用方发成功响应；
+// 返回 false = 错误包络【已发出】，调用方直接 return。
+//
+// 【为什么按状态分开映射】同一个"写失败"背后有四种语义（校验不过 / 撞名 / 不存在 /
+// 磁盘或 DB 故障），它们对应 1001/1005/1004/1008 四个码。合成一个 1008 的代价是
+// 前端只能显示"服务器内部错误"，而录题的人需要看到的是"cases[2].args 类型不对"。
+bool send_write_status(ProblemWriteStatus status, const std::string& error,
+                       httplib::Response& res) {
+  switch (status) {
+    case ProblemWriteStatus::kOk:
+      return true;
+    case ProblemWriteStatus::kInvalid:
+      send(common::fail(common::ApiError::kInvalidArgument, "json", error), res);
+      return false;
+    case ProblemWriteStatus::kConflict:
+      send(common::fail(common::ApiError::kConflict, "slug", "同名题目文件已存在"), res);
+      return false;
+    case ProblemWriteStatus::kMissing:
+      send(common::fail(common::ApiError::kNotFound), res);
+      return false;
+    case ProblemWriteStatus::kIo:
+      send(common::fail(common::ApiError::kInternalError, "", error), res);
+      return false;
+  }
+  return false;   // 不可达
+}
+
+// AdminOpStatus → 包络（同上：kOk 由调用方继续）。
+bool send_admin_op(AdminOpStatus status, const std::string& error, httplib::Response& res) {
+  switch (status) {
+    case AdminOpStatus::kOk:
+      return true;
+    case AdminOpStatus::kNotFound:
+      send(common::fail(common::ApiError::kNotFound), res);
+      return false;
+    case AdminOpStatus::kBusy:
+      send(common::fail(common::ApiError::kStateNotAllowed, "",
+                        "该提交正在评测中，请等它结束后再操作"), res);
+      return false;
+    case AdminOpStatus::kError:
+      send(common::fail(common::ApiError::kInternalError, "", error), res);
+      return false;
+  }
+  return false;   // 不可达
+}
+
+// 请求体里的 "json" 字段（题目 JSON 全文的载体）：必须是对象；
+// slug 取自对象本身（新建时文件名就由它决定）。
+bool problem_json_body(const nlohmann::json& body, std::string* slug, std::string* text,
+                       httplib::Response& res) {
+  const auto it = body.find("json");
+  if (it == body.end() || !it->is_object()) {
+    send(common::fail(common::ApiError::kInvalidArgument, "json",
+                      "缺少 json 对象字段（题目全文以 {\"json\":{…}} 提交）"),
+         res);
+    return false;
+  }
+  const auto slug_it = it->find("slug");
+  *slug = (slug_it != it->end() && slug_it->is_string()) ? slug_it->get<std::string>()
+                                                         : std::string();
+  *text = it->dump();
+  return true;
+}
+
+// GET /api/admin/problems → 题目清单（含归档题：归档要能被"恢复上架"，藏起来等于删除）
+void handle_admin_problems_list(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  std::vector<AdminProblemRow> problems;
+  std::string error;
+  if (!load_admin_problems(lease.session(), &problems, &error)) {
+    send(common::fail(common::ApiError::kInternalError, "", error), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(problems))), res);
+}
+
+// POST /api/admin/problems → 新建（写文件 → 校验 → 同步入库，201）
+void handle_admin_problem_create(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+  std::string slug;
+  std::string text;
+  if (!problem_json_body(body, &slug, &text, res)) return;
+  if (slug.empty()) {
+    send(common::fail(common::ApiError::kInvalidArgument, "json", "题目缺少 slug 字段"), res);
+    return;
+  }
+
+  std::string error;
+  const ProblemWriteStatus status = write_problem_json(slug, text, /*require_existing=*/false,
+                                                       &error);
+  if (!send_write_status(status, error, res)) return;
+  send(common::created(nlohmann::json{{"slug", slug}}), res);
+}
+
+// GET /api/admin/problems/{slug} → 文件全文（编辑器回显）。文件是真源，原样返回。
+void handle_admin_problem_get(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  const std::string slug = req.matches.size() > 1 ? req.matches[1] : std::string();
+  std::string text;
+  std::string error;
+  const ProblemWriteStatus status = read_problem_json(slug, &text, &error);
+  if (!send_write_status(status, error, res)) return;
+
+  try {
+    send(common::ok(nlohmann::json{{"slug", slug},
+                                   {"json", nlohmann::json::parse(text)}}),
+         res);
+  } catch (const std::exception& e) {
+    // 磁盘上的文件竟不是合法 JSON：只可能是被人手改坏了（写回路径一定先校验）
+    common::log_error(common::LogChannel::kApp,
+                      "管理端点 题库文件不是合法 JSON：" + slug + "：" + e.what());
+    send(common::fail(common::ApiError::kInternalError, "", "题库文件已损坏，请看 app.log"), res);
+  }
+}
+
+// PUT /api/admin/problems/{slug} → 编辑（JSON 里的 slug 必须与路径一致，由校验层比对）
+void handle_admin_problem_update(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+  const std::string slug = req.matches.size() > 1 ? req.matches[1] : std::string();
+  std::string json_slug;
+  std::string text;
+  if (!problem_json_body(body, &json_slug, &text, res)) return;
+  if (json_slug != slug) {
+    send(common::fail(common::ApiError::kInvalidArgument, "json",
+                      "json.slug 必须与路径一致（路径=" + slug + "，json=" + json_slug + "）"),
+         res);
+    return;
+  }
+
+  std::string error;
+  const ProblemWriteStatus status = write_problem_json(slug, text, /*require_existing=*/true,
+                                                       &error);
+  if (!send_write_status(status, error, res)) return;
+  send(common::ok(nlohmann::json{{"slug", slug}}), res);
+}
+
+// POST /api/admin/problems/{slug}/archive → 下线归档 / 恢复上架（不物理删，§3 决策）
+void handle_admin_problem_archive(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+  const std::optional<bool> archived = field_bool(body, "archived");
+  if (!archived.has_value()) {
+    send(common::fail(common::ApiError::kInvalidArgument, "archived",
+                      "archived 必须是布尔值（true=下线归档，false=恢复上架）"),
+         res);
+    return;
+  }
+  const std::string slug = req.matches.size() > 1 ? req.matches[1] : std::string();
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  bool found = false;
+  std::string error;
+  if (!set_problem_archived(lease.session(), slug, *archived, &found, &error)) {
+    send(common::fail(common::ApiError::kInternalError, "", error), res);
+    return;
+  }
+  if (!found) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+  send(common::ok(nlohmann::json{{"slug", slug}, {"archived", *archived}}), res);
+}
+
+// GET /api/admin/submissions?page=&size= → 全站提交清单
+void handle_admin_submissions_list(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  SubmissionQuery query;
+  QueryParseError invalid;
+  if (!parse_submission_query(query_of(req), &query, &invalid)) {
+    send(common::fail(common::ApiError::kInvalidArgument, invalid.field, invalid.reason), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  AdminSubmissionPage page;
+  std::string error;
+  if (!load_admin_submissions(lease.session(), query.page, query.size, &page, &error)) {
+    send(common::fail(common::ApiError::kInternalError, "", error), res);
+    return;
+  }
+  send(common::ok(nlohmann::json::parse(to_json(page))), res);
+}
+
+// DELETE /api/admin/submissions/{id} → 删除（明细/诊断由外键连带）
+void handle_admin_submission_delete(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  unsigned long long id = 0;
+  if (!path_id(req, 1, &id)) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  std::string error;
+  const AdminOpStatus status = admin_delete_submission(lease.session(), id, &error);
+  if (!send_admin_op(status, error, res)) return;
+  send(common::ok(nlohmann::json{{"message", "提交记录已删除"}}), res);
+}
+
+// POST /api/admin/submissions/{id}/rejudge → 重置回 pending 并重新入队
+void handle_admin_submission_rejudge(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  unsigned long long id = 0;
+  if (!path_id(req, 1, &id)) {
+    send(common::fail(common::ApiError::kNotFound), res);
+    return;
+  }
+  // 与普通提交同一条闸门顺序：judge 不在 → 1009 且【不改库】（改了就变成一条
+  // 没人来判的 pending，前端轮询到天荒地老 —— 正是 1009 不建行的同一条理由）。
+  if (!judge_available()) {
+    send(common::fail(common::ApiError::kJudgeUnavailable), res);
+    return;
+  }
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  unsigned long long owner = 0;
+  std::string error;
+  const AdminOpStatus status = admin_rejudge_submission(lease.session(), id, &owner, &error);
+  if (!send_admin_op(status, error, res)) return;
+  judge::scheduler().enqueue(id, owner);
+  send(common::created(nlohmann::json{{"submissionId", id}, {"status", "pending"}}), res);
+}
+
+// POST /api/admin/users/{username}/role → 改角色（body {"role":"admin"|"user"}）
+void handle_admin_user_role(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+  const std::string role = field_text(body, "role");
+  if (role != "admin" && role != "user") {
+    send(common::fail(common::ApiError::kInvalidArgument, "role", "role 只能是 admin 或 user"),
+         res);
+    return;
+  }
+  const std::string username = req.matches.size() > 1 ? req.matches[1] : std::string();
+  if (username == user.username) {
+    send(common::fail(common::ApiError::kStateNotAllowed, "",
+                      "不能修改自己的角色（会把当前会话锁在门外），请让另一个管理员操作"),
+         res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  std::string error;
+  const AdminOpStatus status = admin_set_user_role(lease.session(), username, role, &error);
+  if (!send_admin_op(status, error, res)) return;
+  send(common::ok(nlohmann::json{{"username", username}, {"role", role}}), res);
+}
+
+// POST /api/admin/users/{username}/disable → 停用 / 恢复（body {"disabled":true|false}）
+void handle_admin_user_disable(const httplib::Request& req, httplib::Response& res) {
+  AuthUser user;
+  if (!require_admin_viewer(req, res, &user)) return;
+
+  nlohmann::json body;
+  std::string parse_error;
+  if (!parse_body(req, &body, &parse_error)) {
+    send(common::fail(common::ApiError::kInvalidArgument, "", parse_error), res);
+    return;
+  }
+  const std::optional<bool> disabled = field_bool(body, "disabled");
+  if (!disabled.has_value()) {
+    send(common::fail(common::ApiError::kInvalidArgument, "disabled",
+                      "disabled 必须是布尔值"), res);
+    return;
+  }
+  const std::string username = req.matches.size() > 1 ? req.matches[1] : std::string();
+  if (username == user.username && *disabled) {
+    send(common::fail(common::ApiError::kStateNotAllowed, "", "不能停用自己"), res);
+    return;
+  }
+
+  db::Lease lease = db::Pool::instance().acquire();
+  if (!lease.valid()) {
+    send_pool_unavailable(req, res);
+    return;
+  }
+  std::string error;
+  const AdminOpStatus status =
+      admin_set_user_disabled(lease.session(), username, *disabled, &error);
+  if (!send_admin_op(status, error, res)) return;
+  send(common::ok(nlohmann::json{{"username", username}, {"disabled", *disabled}}), res);
 }
 
 // ---- 收口 ----------------------------------------------------------------------
@@ -1001,10 +1417,25 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
   server.Delete(R"(/api/submissions/([0-9]+))", handle_submission_delete);
   server.Post(R"(/api/submissions/([0-9]+)/retry)", handle_submission_retry);
 
-  // 统计组与 admin
+  // 统计组与 admin（概览只读 + 阶段 2 的管理写操作；D-37 变更见 admin.h）
   server.Get("/api/stats", handle_stats);
   server.Get("/api/me/overview", handle_overview);
   server.Get("/api/admin/overview", handle_admin_overview);
+
+  // 题目管理：列表/新建 → 归档子路径 → 单题读/写（顺序无关（[^/]+ 不会吃掉带斜杠的尾巴），
+  // 但显式写成"具体在前"让读代码的人不必推演这一点 —— 与 /favorite 的既有做法一致）
+  server.Get("/api/admin/problems", handle_admin_problems_list);
+  server.Post("/api/admin/problems", handle_admin_problem_create);
+  server.Post(R"(/api/admin/problems/([^/]+)/archive)", handle_admin_problem_archive);
+  server.Get(R"(/api/admin/problems/([^/]+))", handle_admin_problem_get);
+  server.Put(R"(/api/admin/problems/([^/]+))", handle_admin_problem_update);
+
+  // 提交管理与用户管理
+  server.Get("/api/admin/submissions", handle_admin_submissions_list);
+  server.Delete(R"(/api/admin/submissions/([0-9]+))", handle_admin_submission_delete);
+  server.Post(R"(/api/admin/submissions/([0-9]+)/rejudge)", handle_admin_submission_rejudge);
+  server.Post(R"(/api/admin/users/([^/]+)/role)", handle_admin_user_role);
+  server.Post(R"(/api/admin/users/([^/]+)/disable)", handle_admin_user_disable);
 
   // 受保护的 HTML 页面：未登录时重定向到登录页 [D-43]
   // 注意：这些处理器必须在 set_mount_point 之前注册，这样才会优先匹配
@@ -1083,6 +1514,17 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
 bool listen_and_serve(const ServerOptions& options) {
   httplib::Server server;
   if (!register_routes(server, options)) return false;
+
+  // OJ_HTTP_THREADS 运行期生效（P0-2 的修法）。覆盖 httplib 的默认任务队列工厂：
+  //   · 生效值来自 config()，改 .env + 重启即可，dump_config 打印的与真实行为一致；
+  //   · 【固定】线程数（第 2 个参数缺省 = 0 ⇒ 上限 = 基数），不给 httplib 默认的
+  //     动态扩容（基数 × CPPHTTPLIB_THREAD_POOL_MAX_COUNT = 32）。每线程 8MB 是
+  //     【虚拟】栈，但 2 核 2G 上把虚拟内存顶上去照样会推进 swap（SPEC §0.0：
+  //     别过量申请虚拟内存）—— 固定 8 线程 = 64MB 虚拟，动态上限 32 线程 = 256MB。
+  const int http_threads = common::config().http_threads;
+  server.new_task_queue = [http_threads] {
+    return new httplib::ThreadPool(static_cast<std::size_t>(http_threads));
+  };
 
   g_server = &server;
   const bool listening = server.listen(options.listen_host, options.listen_port);

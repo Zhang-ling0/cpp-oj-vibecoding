@@ -135,8 +135,9 @@ bool toggle_favorite(db::Session& session, unsigned long long user_id, const std
     return value == FavoriteStatus::kOk;
   };
 
-  const db::ResultSet problem = session.run("SELECT id FROM problems WHERE slug = ?",
-                                            {db::Value::from_text(slug)});
+  const db::ResultSet problem =
+      session.run("SELECT id FROM problems WHERE slug = ? AND archived = 0",
+                  {db::Value::from_text(slug)});
   if (problem.failed()) {
     fail(error, "收藏：查询题目失败", problem.error());
     return report(FavoriteStatus::kError);

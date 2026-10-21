@@ -499,10 +499,13 @@ CompileResult compile_submission(const std::string& workspace_dir,
   };
 
   // ---- 阶段一：只编用户代码（§5.2）--------------------------------------------
+  // -fkeep-inline-functions：类内定义的成员函数隐式 inline，-c 单独编译时若本 TU
+  // 没有调用点，GCC 不会把它落进 user.o，阶段二链接必报 undefined reference
+  // （题库 22/26 个 code_template 都是类内定义，不加此旗标正确代码全判 CE）。
   const std::vector<std::string> stage1{
       options.compiler,        options.language_standard, options.optimization,
-      options.warnings,        "-c",                      kUserSource,
-      "-o",                    kUserObject};
+      options.warnings,        "-fkeep-inline-functions", "-c",
+      kUserSource,             "-o",                      kUserObject};
   result.commands.push_back(join_command(stage1));
   const CommandResult raw1 =
       run_command(stage1, workspace_dir, options.timeout_ms, options.max_output_bytes);

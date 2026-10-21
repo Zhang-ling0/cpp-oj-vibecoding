@@ -151,7 +151,9 @@ std::string normalize_enum_text(const std::string& text) { return to_lower(trim(
 // 就会在"乘完再数"的结果上取 —— 第 2 页直接漏题。EXISTS 不改变行数。
 void append_where(unsigned long long viewer_id, const ListQuery& query, std::string* sql,
                   std::vector<db::Value>* params) {
-  std::string clause = " WHERE 1 = 1";
+  // archived=0（阶段 2 下线归档）放在基句而不是各个筛选分支里：COUNT 与取页共用本函数，
+  // 归档题因此在两个口径里同时消失 —— 分散写两处迟早会漏掉一处，症状是"总数和页数对不上"。
+  std::string clause = " WHERE p.archived = 0";
 
   if (!query.keyword.empty()) {
     const std::string pattern = "%" + escape_like(query.keyword) + "%";
@@ -571,6 +573,11 @@ bool query_problems(db::Session& session, const ViewerContext* viewer, const Lis
     return fail_text(error, "统计题目总数失败：查询返回 0 行（COUNT 本应恰好 1 行）");
   }
 
+  // 服务端夹页（P1-6）：筛选变化后 page 可能越界，夹回真实最大页。
+  const long long total_all = static_cast<long long>(counted.at(0).u64(0, 0));
+  const long long max_page = total_all == 0 ? 1 : (total_all + page_size - 1) / page_size;
+  const int effective_page = (query.page > max_page) ? static_cast<int>(max_page) : query.page;
+
   // ② 取页。参数顺序必须与 SQL 文本里 ? 的出现顺序严格一致：
   //    LEFT JOIN → SELECT 里的进度表达式（2 个）→ WHERE（append_where 追加的）→ LIMIT/OFFSET。
   std::string sql;
@@ -599,14 +606,14 @@ bool query_problems(db::Session& session, const ViewerContext* viewer, const Lis
   params.insert(params.end(), where_params.begin(), where_params.end());
   params.emplace_back(db::Value::from_i64(page_size));
   params.emplace_back(db::Value::from_i64(
-      static_cast<long long>(query.page - 1) * static_cast<long long>(page_size)));
+      static_cast<long long>(effective_page - 1) * static_cast<long long>(page_size)));
 
   const db::ResultSet result = session.run(sql, params);
   if (result.failed()) return fail(error, "查询题目列表失败", result.error());
 
   ProblemList list;
-  list.total = static_cast<long long>(counted.at(0).u64(0, 0));
-  list.page = query.page;
+  list.total = total_all;
+  list.page = effective_page;
   list.size = page_size;
   list.list.reserve(result.size());
   for (const db::Row& row : result.rows()) {
@@ -705,7 +712,7 @@ DetailStatus load_problem_detail(db::Session& session, const std::string& slug,
       "                                        'cppType', pp.cpp_type))"
       "            FROM problem_params pp WHERE pp.problem_id = p.id), JSON_ARRAY()) AS param_json"
       " FROM problems p LEFT JOIN user_problems up ON up.problem_id = p.id AND up.user_id = ?"
-      " WHERE p.slug = ?";
+      " WHERE p.slug = ? AND p.archived = 0";   // 归档题对用户不可见（阶段 2）→ 1004
 
   const db::ResultSet result =
       session.run(sql, {db::Value::from_u64(viewer_id),   // LEFT JOIN user_problems
@@ -900,7 +907,7 @@ bool compute_next_recommendation(db::Session& session, const ViewerContext& view
       " JOIN problems p ON p.id = pt.problem_id"
       " LEFT JOIN (SELECT DISTINCT problem_id FROM submissions"
       "             WHERE user_id = ? AND verdict = 'AC') ac ON ac.problem_id = p.id"
-      " WHERE t.category = 'algorithm'"
+      " WHERE t.category = 'algorithm' AND p.archived = 0"   // 归档题不参与"下一题建议"
       " GROUP BY t.id, t.name"
       " ORDER BY t.id";
   const db::ResultSet tag_result = session.run(kTagSql, {db::Value::from_u64(viewer.user_id)});
@@ -927,7 +934,8 @@ bool compute_next_recommendation(db::Session& session, const ViewerContext& view
       "                  WHERE pt2.problem_id = p.id AND t2.category = 'algorithm'),"
       "                JSON_ARRAY()) AS algo_tags"
       " FROM problems p"
-      " WHERE NOT EXISTS (SELECT 1 FROM submissions s"
+      " WHERE p.archived = 0"                                  // 归档题不参与"下一题建议"
+      "   AND NOT EXISTS (SELECT 1 FROM submissions s"
       "                    WHERE s.problem_id = p.id AND s.user_id = ? AND s.verdict = 'AC')"
       "   AND EXISTS (SELECT 1 FROM problem_tags pt3 JOIN tags t3 ON t3.id = pt3.tag_id"
       "                WHERE pt3.problem_id = p.id AND t3.category = 'algorithm')"

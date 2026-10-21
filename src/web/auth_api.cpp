@@ -212,7 +212,7 @@ bool login_user(db::Session& db_session, const std::string& username, const std:
   // 【参数校验对登录【不设闸】】—— 登录失败统一是 1001，如果这里先按注册那套报
   // "用户名长度不足"，就成了枚举接口的另一半（能区分"格式非法"与"用户不存在"）。
   static const char* kSelectSql =
-      "SELECT id, username, role, password_hash FROM users WHERE username = ?";
+      "SELECT id, username, role, password_hash, disabled FROM users WHERE username = ?";
   // 只按用户名查一条（唯一键），口令在 C++ 侧用 bcrypt 比对 —— 不存在
   // `WHERE username=? AND password_hash=?` 这种写法，哈希是自相关的、没法进 SQL。
   const db::ResultSet found = db_session.run(kSelectSql, {db::Value::from_text(username)});
@@ -235,6 +235,7 @@ bool login_user(db::Session& db_session, const std::string& username, const std:
   const std::string stored_username = row.str(1);
   const std::string role = row.str(2);
   const std::string stored_hash = row.str(3);
+  const bool disabled = row.boolean(4);
 
   // 库里若存着形状非法的哈希（历史脏数据或手工改库），verify 返回 false ⇒ 1001。
   // 刻意不"按哈希无效就放行"也不"报 1008"：前者是认证绕过，后者把用户的输入问题
@@ -242,6 +243,17 @@ bool login_user(db::Session& db_session, const std::string& username, const std:
   if (!is_hash_wellformed(stored_hash) || !verify_password(password, stored_hash)) {
     set_failure(out_failure, common::ApiError::kInvalidArgument, "用户名或密码错误", false);
     if (out_failure != nullptr) out_failure->field.field = "password";
+    return false;
+  }
+
+  // 【停用闸放在口令比对【之后】】：顺序反过来，"密码错 + 账号已停用"会直接说"已停用"，
+  // 于是登录接口就变成了"这个用户名存在且被停用"的枚举器（防枚举的口径与上面几处一致）。
+  // 口令对了才告诉他"被停用了"—— 此时他本来就该知道自己是谁。
+  // 能走到这里说明停用时的会话清空（admin_set_user_disabled）也一定执行过，
+  // 但那只能挡住【已有】会话，本行挡的是【新】会话，两道都要。
+  if (disabled) {
+    set_failure(out_failure, common::ApiError::kStateNotAllowed, "账号已被停用，请联系管理员",
+                false);
     return false;
   }
 

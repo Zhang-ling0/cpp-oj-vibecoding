@@ -198,40 +198,64 @@
 
 ### 阶段 1 · 判题引擎
 
-- [ ] **1.1** 建 `include/judge/{queue,scheduler,worker,runner,generator}.h` 五个头文件
-- [ ] **1.2** 实现 `src/judge/queue.cpp`（FIFO + condvar，按 id 升序）
-- [ ] **1.3** 实现 `src/judge/scheduler.cpp`（workers=2、gate=4、fence 校验）
-- [ ] **1.4** 实现 `src/judge/generator.cpp`（题库 → harness 生成）
-- [ ] **1.5** 实现 `src/judge/runner.cpp`（fork + RLIMIT_AS + 时间墙 + MALLOC_ARENA_MAX）
-- [ ] **1.6** 实现 `src/judge/worker.cpp`（编译 → 逐用例 → verdict 判定 → 单事务写回）
-- [ ] **1.7** 实现 `src/db/dao.cpp` + `include/db/dao.h`（写回事务 + 启动恢复置 JE）
-- [ ] **1.8** 接线①：`submission_api.cpp:154` `judge_available()` 改读调度器存活
-- [ ] **1.9** 接线②：`main.cpp:363` 启动判题调度器
-- [ ] **1.10** 接线③：`main.cpp:332` 角色同步 T3.11 接线
-- [ ] **1.11** 接线④：`routes.cpp` 注入真实 StatusProvider 替代 `unwired_status()`
-- [ ] **1.12** 修 P1-5：历史页空页死局（后端夹页 + 分页器兜底 + 改假注释）
-- [ ] **1.13** 修 P1-6：列表页页码越界与假注释
-- [ ] **1.14** 修 P1-8：概览条 `user=null` TypeError
-- [ ] **1.15** `make build JOBS=2 && make test`
-- [ ] **1.16** 端到端验收：提交 AC / CE / TLE / RE 各一条真代码，核对 verdict、逐用例表、编译诊断、历史页
-- [ ] **1.17** 跑 playwright 手册 M05–M12 回归
+- [x] **1.1** 建 `include/judge/{queue,scheduler,worker,runner,generator}.h` 五个头文件
+- [x] **1.2** 实现 `src/judge/queue.cpp`（FIFO + condvar，按 id 升序）
+- [x] **1.3** 实现 `src/judge/scheduler.cpp`（workers=2、gate=4、fence 校验）
+- [x] **1.4** 实现 `src/judge/generator.cpp`（题库 → harness 生成）
+- [x] **1.5** 实现 `src/judge/runner.cpp`（fork + RLIMIT_AS + 时间墙 + MALLOC_ARENA_MAX）
+- [x] **1.6** 实现 `src/judge/worker.cpp`（编译 → 逐用例 → verdict 判定 → 单事务写回）
+- [x] **1.7** 实现 `src/db/dao.cpp` + `include/db/dao.h`（写回事务 + 启动恢复置 JE）
+- [x] **1.8** 接线①：`submission_api.cpp:154` `judge_available()` 改读调度器存活
+- [x] **1.9** 接线②：`main.cpp:363` 启动判题调度器
+- [x] **1.10** 接线③：`main.cpp:332` 角色同步 T3.11 接线
+- [x] **1.11** 接线④：`routes.cpp` 注入真实 StatusProvider 替代 `unwired_status()`
+- [x] **1.12** 修 P1-5：历史页空页死局（后端夹页 + 分页器兜底 + 改假注释）
+- [x] **1.13** 修 P1-6：列表页页码越界与假注释
+- [x] **1.14** 修 P1-8：概览条 `user=null` TypeError
+- [x] **1.15** `make build JOBS=2 && make test`
+- [x] **1.16** 端到端验收：提交 AC / CE / TLE / RE 各一条真代码，核对 verdict、逐用例表、编译诊断、历史页
+- [x] **1.17** 跑 playwright 手册 M05–M12 回归
 
 ### 阶段 2 · 管理端 CRUD（判题验收通过后）
 
-- [ ] **2.1** 实现 `src/web/ratelimit.cpp` 滑动窗口限流（1006）
-- [ ] **2.2** 实现单用户并发评测闸（1007），接入 `handle_submission_create`
-- [ ] **2.3** `admin.cpp` 扩写题目管理 CRUD（新建 / 编辑 / 下线归档，不物理删）
-- [ ] **2.4** `admin.cpp` 扩写提交管理（列表 / 删除 / 重判）
-- [ ] **2.5** `admin.cpp` 扩写用户管理（改角色 / 停用）
-- [ ] **2.6** 实现 `problems/<slug>.json` 写回 + 单题同步入库（不重启）
-- [ ] **2.7** `admin.html` + `admin.js` 改四 tab 管理台
-- [ ] **2.8** 修 P1-7：历史展开行切换行为
-- [ ] **2.9** 修 P1-10：`language` 白名单校验
-- [ ] **2.10** 修 P1-14：匿名 tab3 文案
-- [ ] **2.11** 落地 `OJ_HTTP_THREADS` 运行期生效
-- [ ] **2.12** 在 SPEC.md / API.md 记录 D-37 变更（admin 由严格只读改为可写）
-- [ ] **2.13** `make build JOBS=2 && make test` + 管理台手工验收
+- [x] **2.1** 实现 `src/web/ratelimit.cpp` 滑动窗口限流（1006）
+- [x] **2.2** 实现单用户并发评测闸（1007），接入 `handle_submission_create`
+- [x] **2.3** `admin.cpp` 扩写题目管理 CRUD（新建 / 编辑 / 下线归档，不物理删）
+- [x] **2.4** `admin.cpp` 扩写提交管理（列表 / 删除 / 重判）
+- [x] **2.5** `admin.cpp` 扩写用户管理（改角色 / 停用）
+- [x] **2.6** 实现 `problems/<slug>.json` 写回 + 单题同步入库（不重启）
+- [x] **2.7** `admin.html` + `admin.js` 改四 tab 管理台
+- [x] **2.8** 修 P1-7：历史展开行切换行为
+- [x] **2.9** 修 P1-10：`language` 白名单校验
+- [x] **2.10** 修 P1-14：匿名 tab3 文案
+- [x] **2.11** 落地 `OJ_HTTP_THREADS` 运行期生效
+- [x] **2.12** 在 SPEC.md / API.md 记录 D-37 变更（admin 由严格只读改为可写）
+- [x] **2.13** `make build JOBS=1 && make test` + 管理台手工验收
 
+> 阶段 2 实施时的额外发现与落地决策（不在原清单里，但必须留档）：
+>
+> 1. **新列迁移不能只改 `01-schema.sql`**：它是 `CREATE TABLE IF NOT EXISTS`（建新表才生效，
+>    不给已有表加列），活库/测试库已有 `users`、`problems`。故新增列后同时在
+>    `src/main.cpp` 加了幂等 `ensure_columns()`（查 information_schema → 按需 `ALTER TABLE`），
+>    并在本次验收前手工对活库执行过一次等价 ALTER。**新库与老库两条路径都覆盖**。
+> 2. **`users.disabled` 的登录闸放在口令比对【之后】**：放在前面会让登录接口变成
+>    "该用户名存在且已停用"的枚举器（与 auth_api 既有防枚举口径一致）。
+> 3. **P1-7 顺带修掉一个真 bug**：`history.js` 的 `toggleDetail()` 闭包引用了
+>    `initHistoryPage()` 的局部 `state`（未作参数传入），展开任何一行详情都会
+>    ReferenceError 停在"加载中…"。修行为的同时把 `state` 透传了进去。
+> 4. **HTTP 线程池用固定 `httplib::ThreadPool(n)` 而不是 httplib 默认的动态池**：
+>    默认允许涨到基数 × 4（32 线程 × 8MB 虚拟栈 = 256MB 虚拟地址），
+>    在 1967MB + swap 已用 1GB 的机器上正是 SPEC §0.0 禁止的过量申请。
+> 5. 编译全程 `JOBS=1`（与阶段 0/1 相同，机器内存不够 `JOBS=2`）。
+> 6. **验收结果**：`make build JOBS=1` 绿；`make test` **417/417**；`tests/run_tests.sh` **147/147**
+>    （原脚本里两条"judge 未接线 → 1009"是阶段 1 的过期断言，已改为验 201 + [D-58] 新增记录；
+>    另新增 [21] 管理写侧 与 [22] 限流两节，覆盖 1006/1007 顺序、题目写回/归档、
+>    提交删除/重判、改角色/停用与停用后登录 1011）。`OJ_HTTP_THREADS` 实测：改 4 →
+>    启动日志与 dump_config 均打 4、进程线程数较 8 少 4（运行期生效，顺带修掉 main.cpp 里
+>    写死"线程池 8"的启动日志）。
+> 7. **管理台页面的浏览器级验收留给人工**（playwright-cli 未安装）：页面/脚本/接口三层已由
+>    e2e + 静态 id 对账（admin.js 的 25 个 `querySelector('#…')` 与 admin.html 完全对应）覆盖。
+>
 ### 阶段 3 · 资源与收尾
 
 - [ ] **3.1** 父进程设置 `MALLOC_ARENA_MAX=1`，HTTP 线程默认 4
