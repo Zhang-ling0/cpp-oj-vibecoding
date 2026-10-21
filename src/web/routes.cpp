@@ -1008,7 +1008,7 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
 
   // 受保护的 HTML 页面：未登录时重定向到登录页 [D-43]
   // 注意：这些处理器必须在 set_mount_point 之前注册，这样才会优先匹配
-  server.Get("/history.html", [](const httplib::Request& req, httplib::Response& res) {
+  server.Get("/history.html", [&options](const httplib::Request& req, httplib::Response& res) {
     bool server_error = false;
     std::optional<AuthUser> user = viewer_of(req, res, &server_error);
     if (server_error) return;  // DB 异常，已在 viewer_of 中处理
@@ -1032,7 +1032,7 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
     res.set_content(ss.str(), "text/html; charset=utf-8");
   });
 
-  server.Get("/admin.html", [](const httplib::Request& req, httplib::Response& res) {
+  server.Get("/admin.html", [&options](const httplib::Request& req, httplib::Response& res) {
     bool server_error = false;
     std::optional<AuthUser> user = viewer_of(req, res, &server_error);
     if (server_error) return;  // DB 异常，已在 viewer_of 中处理

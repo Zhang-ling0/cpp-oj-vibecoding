@@ -194,6 +194,27 @@ curl -s -c /tmp/oj.jar -X POST $BASE/api/auth/login -H 'Content-Type: applicatio
   -d "{\"username\":\"$U\",\"password\":\"pass1234\"}"          # 200/0 + Set-Cookie: sid=…
 ```
 
+> **阶段 0 之后库里没有任何提交行**（`oj-reset` 不再伪造判题结果，见 P0-4）。
+> 提交类端点（详情 / diff / 删除 / 重跑）要先拿到 `id` 才能验，取法二选一：
+>
+> 1. **判题引擎接线后**：真提交一条，再从列表取 id。
+>    ```bash
+>    SID=$(curl -s -b /tmp/oj.jar "$BASE/api/submissions" | jq -r '.data.list[0].id // empty')
+>    ```
+> 2. **接线前**：跑 `bash tests/run_tests.sh`（它自己用 SQL 造行，用完自清），
+>    或手工插一条（与脚本同一写法）：
+>    ```bash
+>    SID=$(mysql -h127.0.0.1 -uoj -poj oj -N -e \
+>      "INSERT INTO submissions (user_id, problem_id, language, code, status, verdict, message,
+>        case_passed, case_total, total_ms, max_mem_kb, created_at, finished_at)
+>       SELECT u.id, p.id, 'cpp', 'SELECT 1;', 'done', 'AC', NULL, 1, 1, 1, 1024,
+>              UTC_TIMESTAMP(), UTC_TIMESTAMP()
+>       FROM users u, problems p WHERE u.username='${U}' AND p.slug='two-sum';
+>       SELECT LAST_INSERT_ID();" 2>/dev/null | tail -1)
+>    ```
+>
+> 空库（`SID` 为空）时，「不存在的 id」那几条断言照样可验：直接用 `999999999` 之类。
+
 | 端点 | 命令 | 期望 |
 |---|---|---|
 | 我是谁 | `curl -s -b /tmp/oj.jar $BASE/api/auth/me` | `200/0`；不带 jar → `401/1002` |
@@ -212,11 +233,11 @@ curl -s -c /tmp/oj.jar -X POST $BASE/api/auth/login -H 'Content-Type: applicatio
 | 概览 | `curl -s -b /tmp/oj.jar $BASE/api/me/overview` | `200/0`：`totals` + `byDifficulty` + `byTag` + `recent` |
 | 管理面板 | `curl -s -b /tmp/oj.jar $BASE/api/admin/overview` | admin `200/0`；普通用户 `403/1003`；匿名 `401/1002` |
 | 提交 | `curl -s -b /tmp/oj.jar -X POST $BASE/api/submissions -H 'Content-Type: application/json' -d '{"problemSlug":"two-sum","code":"class Solution{};"}'` | judge 未接线 → `503/1009` |
-| 提交历史 | `curl -s -b /tmp/oj.jar "$BASE/api/submissions?verdict=AC&page=1"` | `200/0`，仅本人数据 |
-| 提交详情 | `curl -s -b /tmp/oj.jar $BASE/api/submissions/91` | `200/0`；别人的 `403/1003`；不存在 `404/1004` |
-| diff | `curl -s -b /tmp/oj.jar "$BASE/api/submissions/diff?from=12&to=15"` | `200/0`；`from==to` → `400/1001` |
-| 删提交 | `curl -s -b /tmp/oj.jar -X DELETE $BASE/api/submissions/91` | `200/0`；别人的 `403/1003` |
-| 重跑 | `curl -s -b /tmp/oj.jar -X POST $BASE/api/submissions/91/retry` | 非 failed/JE → `409/1011` |
+| 提交历史 | `curl -s -b /tmp/oj.jar "$BASE/api/submissions?verdict=AC&page=1"` | `200/0`，仅本人数据；**空库时 `data.total=0`、`data.list=[]`**（阶段 0 的正确状态） |
+| 提交详情 | `curl -s -b /tmp/oj.jar $BASE/api/submissions/$SID`（`SID` 见上方取法） | `200/0`；别人的 `403/1003`；不存在 `404/1004` |
+| diff | `curl -s -b /tmp/oj.jar "$BASE/api/submissions/diff?from=${SID}&to=${SID2}"` | `200/0`；`from==to` → `400/1001`（`SID2` 取另一条本人提交） |
+| 删提交 | `curl -s -b /tmp/oj.jar -X DELETE $BASE/api/submissions/$SID` | `200/0`；别人的 `403/1003` |
+| 重跑 | `curl -s -b /tmp/oj.jar -X POST $BASE/api/submissions/$SID/retry` | 非 failed/JE → `409/1011`；**judge 接线前 failed/JE → `503/1009`** |
 | 改密码 | `curl -s -b /tmp/oj.jar -X POST $BASE/api/auth/password -H 'Content-Type: application/json' -d '{"oldPassword":"pass1234","newPassword":"newpass1234"}'` | `200/0`；旧密码错 → `400/1001 field=oldPassword` |
 | 注销账号 | `curl -s -b /tmp/oj.jar -X DELETE $BASE/api/auth/account -H 'Content-Type: application/json' -d '{"password":"newpass1234"}'` | `200/0`，随后该账号登录得 `400/1001` |
 | 静态 | `curl -s -o /dev/null -w '%{http_code}\n' $BASE/login.html` | `200`；不存在 → `404/1004` |
@@ -370,6 +391,11 @@ logs/judge.log      判题日志（judge 未接线时为空）
 提交读侧的四个端点（列表 / 详情 / diff / 删除）与重跑的前置条件，验收脚本是用 **SQL 造出
 judge 写回时会产生的那种行** 再从 HTTP 侧验的 —— 也就是说，**归属校验（`1003`）、分页、
 `diff`、`canRetry`、`1011` 都被真实验证过**，唯独「代码真的被编译运行」这一步没有。
+
+> **阶段 0 之后**：`oj-reset` 不再伪造提交行，所以**初始库的提交三表恒为 0 行**
+> （`oj-reset` 造完会自检，非 0 直接失败）。上面这套 SQL 造行因此从"补数据"变成了
+> "唯一的接线前验数手段"；判题引擎上线后则应改用真提交，本节的 SQL 造行只留给
+> 边界用例（JE / failed）。
 
 ---
 

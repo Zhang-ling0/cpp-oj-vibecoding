@@ -19,7 +19,7 @@
 | 症状 | 根因 | 位置 |
 |---|---|---|
 | 提交返回 1009「判题服务不可用」，不落库 | `judge_available()` 硬编码 `return false` | `src/web/submission_api.cpp:154` |
-| 提交历史全是假的 | 造数工具伪造 verdict/明细 | `tools/reset_db.cpp:876-940` |
+| 提交历史全是假的 | 造数工具伪造 verdict/明细 | `tools/reset_db.cpp:876-940`（**阶段 0 已修**：伪造插入已删除，三表恒 0 行 + 自检） |
 | 管理面板只有只读卡片 | D-37 刻意只读，CRUD 未实现 | `src/web/admin.cpp` |
 | 判题跑不起来 | `src/judge/{queue,scheduler,worker,runner,generator}.cpp` 与对应 `.h` 全 0 字节 | `src/judge/` |
 | 限流/配额不生效 | `src/web/ratelimit.cpp` 0 字节，配置零消费 | 见 P0-1 |
@@ -56,11 +56,12 @@
 - **触发条件**：任何提交 → `judge_available()` 返回 false → 1009 且不建行
 - **修法**：见 §2 阶段 1
 
-#### P0-4 库中判题结果是伪造的
+#### P0-4 库中判题结果是伪造的 ✅ 已修复（阶段 0，2026-10-21）
 
 - **证据**：`tools/reset_db.cpp:876-940` 直接 INSERT 成 judge 写回后的样子（40 提交 / 95 明细 / 6 诊断）
 - **触发条件**：`make run` 后打开「我的」页、题目页 tab3、概览条 —— 看到的全部 verdict 都不是判出来的
-- **修法**：见 §2 阶段 0
+- **现状**：伪造插入逻辑（`Kind` / `SubSeed` / `kSubmissions` / `insert_submission` / `insert_case_results`）
+  已整体删除；`oj-reset` 造完自检「提交三表必须 0 行」，非 0 直接失败；活库已清空并重跑题库同步
 
 ---
 
@@ -182,13 +183,18 @@
 
 ## 6. TODO 清单
 
-### 阶段 0 · 清假数据
+### 阶段 0 · 清假数据 ✅ 已完成（2026-10-21）
 
-- [ ] **0.1** 改造 `tools/reset_db.cpp`：删除 `:876-940` 的伪造提交插入，只造题目 + 用户
-- [ ] **0.2** 活库清空 4 张表（submissions / submission_case_results / submission_compile_errors / user_problems），重跑题库同步
-- [ ] **0.3** 修正 curl 接口文档中依赖假数据的断言
-- [ ] **0.4** 修正 playwright 测试文档 M05–M12 中依赖假数据的断言
-- [ ] **0.5** `make build JOBS=2 && make test` 验证阶段 0 无回归
+- [x] **0.1** 改造 `tools/reset_db.cpp`：删除 `:876-940` 的伪造提交插入，只造题目 + 用户
+- [x] **0.2** 活库清空 4 张表（submissions / submission_case_results / submission_compile_errors / user_problems），重跑题库同步
+- [x] **0.3** 修正 curl 接口文档中依赖假数据的断言
+- [x] **0.4** 修正 playwright 测试文档 M05–M12 中依赖假数据的断言
+- [x] **0.5** `make build JOBS=2 && make test` 验证阶段 0 无回归（本机内存紧张，实际用 `JOBS=1` 串行编译；417 单测全绿 + `tests/run_tests.sh` 98/98）
+
+> 阶段 0 实施时额外发现并修掉**两个让仓库完全编译不过**的既有破损（不在原清单里）：
+> `include/web/admin.h` 首行多了一个 `q` 字符（commit `99cb5c8` 引入）；
+> `src/web/routes.cpp:1024/1048` 两个受保护页面 lambda 用了 `options` 却没捕获。
+> 阶段 1 开工前请先确认 `make build` 是绿的，否则接线工作无法验收。
 
 ### 阶段 1 · 判题引擎
 

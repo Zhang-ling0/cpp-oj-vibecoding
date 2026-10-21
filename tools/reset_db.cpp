@@ -1,12 +1,15 @@
 // =============================================================================
 // CppOJ 数据库重置 + 造数工具（可执行文件 oj-reset）
 //
-// 【为什么需要它】《web自动化测试文档.md》§3.1/§3.2 的实测基线里，
-//   提交记录 0 条、题库 1 道题、用户 7 个 —— 于是 §3.2 列出的 6 类断言
-//   （难度筛选 / 分页 / 仅看收藏 / 掌握分布 total=0 / 标签排序 / 结果面板）
-//   在本实例上【无法证伪】，文档明确写着"不得记为通过"。
-//   §3.3 给的临时手段是手工 SQL 造数；本工具把那段过程固化成一条可重复执行的命令：
-//   清空 11 张表 → 重建题库 → 造用户/会话/收藏/提交/逐用例明细 → 打印核对结果。
+// 【为什么需要它】《web自动化测试文档.md》§3.1/§3.2 的实测基线需要一份【可重复的干净底座】：
+//   题库（≥25 道、easy/medium/hard 三档齐全、标签多样）+ 7 个账号 + 4 条可注入 Cookie 的会话。
+//   本工具把「清表 → 写题库文件 → 走正式 loader 入库 → 造账号/会话/收藏」固化成一条命令。
+//
+// 【阶段 0 关键变更（问题清单 P0-4，2026-10-20 审计）】：本工具【不再伪造任何判题结果】。
+//   submissions / submission_case_results / submission_compile_errors 三张表造完必须是 0 行 ——
+//   它们只能由判题引擎写回（SPEC §5.6）。此前「按 judge 写回后的样子直接 INSERT」的路径已整体删除，
+//   否则前端历史页 / verdict / 逐用例明细 / 掌握分布 / 运维概览看到的全是假数据。
+//   推论：judge 接线前，上述位置的提交类数字都应为 0，测试断言也按 0 写。
 //
 // 【用法】（必须从项目根目录执行，.env 与 problems/ 都是相对路径）
 //   make build JOBS=2 && ./build/oj-reset            # 真跑
@@ -16,11 +19,9 @@
 // 【造出来的数据对应文档里的哪些用例】（详见末尾回显）
 //   · ≥25 道题、easy/medium/hard 三档齐全、标签多样
 //       → 解除 WT-LS-04 / WT-LS-09 / WT-LS-22 / WT-MG-03 / WT-MG-05 的 🔴 与 🟢 部分
-//   · 6 种 verdict + failed/JE 的提交与逐用例明细、CE 的编译诊断行
-//       → 解除 WT-RS-01~10 / WT-HR-01~16 的渲染分支（§3.3 路径 B）
-//   · 31 条提交（> 每页 20 条）→ 解除 WT-HR-02 的分页
 //   · 7 个账号（admin 1 + 普通 6）+ 可直接注入 Cookie 的会话行
 //       → WT-TB-03 / WT-AD-04（共 7 人）/ WT-AC-06（双会话）/ 会话过期用例
+//   · 提交类数据一律为 0：WT-HR-03 空态、WT-MG 全 0 通过率、WT-AD-02「提交 0」都按空库验
 //
 // 【为什么走 problems/*.json 而不是直接 INSERT problems】
 //   D-30 定的是"题库文件为源、启动时同步入库"。直接往 problems 表插行虽然更省事，
@@ -29,10 +30,10 @@
 //   则全程只经过 D-64 那套校验，坏题当场被跳过并报出原因，与正式启动路径完全一致。
 //
 // 【本机 2 核 / 1967MB 的三条自我约束（SPEC §0.0）】
-//   ① 不申请大块虚拟内存：所有数据是流式写库的（一条提交写完就丢），
+//   ① 不申请大块虚拟内存：所有数据是流式写库的（一条写完就丢），
 //      常驻的只有 26 道题的元信息与用例快照（约几十 KB），没有大数组、没有预留容量。
-//   ② 不编译任何东西：不调 g++、不起 judge worker。判题相关数据一律【按 judge 写回后的
-//      样子】直接落库（§3.3 路径 B），否则在这台机器上编译 + 评测会把服务卡死。
+//   ② 不编译任何东西、不造任何判题结果：不调 g++、不起 judge worker，也【不再】往提交三表写行 ——
+//      提交数据只能等判题引擎上线后由它真判出来。判题未接线期间这三张表保持为空即为正确状态。
 //   ③ 不起线程：连接池 size=1（[D-21] 本就串行化），全部语句在主线程顺序执行。
 //
 // 【它会做什么不可逆的事】11 张表全部清空（含 users、submissions），
@@ -71,9 +72,6 @@ struct Stats {
   int users = 0;
   int sessions = 0;
   int favorites = 0;
-  int submissions = 0;
-  int case_rows = 0;
-  int compile_rows = 0;
   int problem_files_written = 0;
   int problem_files_kept = 0;
 };
@@ -668,7 +666,10 @@ std::map<long long, ProblemRow> load_problems(Session& s) {
 }
 
 // =============================================================================
-// 造数：账号 / 会话 / 收藏 / 提交 / 逐用例明细 / 编译诊断
+// 造数：账号 / 会话 / 收藏
+//
+// ⚠️ 这里【没有】提交 / 逐用例明细 / 编译诊断的插入函数：判题结果只能由 judge 写回
+//    （问题清单 P0-4）。要验提交相关的渲染分支，请接线判题引擎后提交真代码。
 // =============================================================================
 struct SeedUser {
   const char* username;
@@ -678,14 +679,15 @@ struct SeedUser {
 };
 
 // 7 个账号，正好对上 WT-AD-04 的「共 7 人」；alice01 刻意零提交，
-// 对应 WT-AD-05（通过率显示 — 而不是 0%）。
+// 对应 WT-AD-05（通过率显示 — 而不是 0%）。阶段 0 之后【所有人都是零提交】，
+// 通过率一律为 "—"，直到判题引擎接线并真的判出提交为止。
 const SeedUser kUsers[] = {
     {"admin", "admin123", "admin", "运维概览用（D-37 的 admin）"},
     {"ZhangLing", "666666", "user", "主力普通账号（库中存大写，登录大小写不敏感）"},
     {"alice01", "pass1234", "user", "零提交账号，用于 WT-AD-05"},
-    {"bob02", "pass1234", "user", "有提交，用于 WT-SX-02~06 越权用例"},
-    {"carol03", "pass1234", "user", "有提交，用于管理端清单多样性"},
-    {"dave04", "pass1234", "user", "只有一条 TLE，用于管理端清单多样性"},
+    {"bob02", "pass1234", "user", "WT-SX-02~06 越权用例的目标账号"},
+    {"carol03", "pass1234", "user", "管理端清单多样性"},
+    {"dave04", "pass1234", "user", "管理端清单多样性"},
     {"erin05", "pass1234", "user", "零提交账号"},
 };
 constexpr int kUserCount = static_cast<int>(sizeof(kUsers) / sizeof(kUsers[0]));
@@ -716,268 +718,6 @@ void insert_session(Session& s, long long user_id, const std::string& tag, long 
             Value::from_text(utc_stamp(-minutes_left)), Value::from_text(utc_stamp(60))},
            "插入会话 " + tag);
   ++g_stats.sessions;
-}
-
-// kPending 只服务于两个断言：管理端「未完成提交」计数（WT-AD-02）与历史页的
-// pending 徽标。它是"提交已受理但还没判完"的中间态，因此 verdict / 度量 / finished_at
-// 全部为 NULL —— 与 D-65 的 CE 兜底口径同源：聚合列缺失时由题库用例数兜底。
-enum class Kind { kAc, kWa, kTle, kMle, kRe, kCe, kJe, kPending };
-
-const char* verdict_of(Kind kind) {
-  switch (kind) {
-    case Kind::kAc: return "AC";
-    case Kind::kWa: return "WA";
-    case Kind::kTle: return "TLE";
-    case Kind::kMle: return "MLE";
-    case Kind::kRe: return "RE";
-    case Kind::kCe: return "CE";
-    case Kind::kJe: return "JE";
-    case Kind::kPending: return nullptr;  // verdict 列可空（DDL：仅 status=done 时非空）
-  }
-  return "AC";
-}
-
-struct SubSeed {
-  const char* username;
-  const char* slug;
-  Kind kind;
-  int pass_cases;   // 前几个用例通过；CE / JE 不产生明细行（§5.6 的 0 明细行不变量）
-  long ago_minutes;
-};
-
-// ZhangLing 的 34 条提交：verdict 按固定循环铺开，时间逐条前移，于是「默认时间倒序、
-// 首行最新」（WT-HR-01）与「第 1 / 2 页」（WT-HR-02）都能验。
-//
-// ⚠️ 刻意只覆盖 21 道题，留下 5 道【从未提交】：sum-positive / count-spaces / to-upper /
-// replace-negatives / count-equal。原因是 WT-LS-20 要同时验三态（已通过 / 尝试过 / 未开始）——
-// 一旦 26 道题全被碰过，"未开始"就没有样本了，而没有样本的断言不能算通过。
-// 加新提交时先确认不会把最后这几道题碰掉。
-//
-// ⚠️⚠️ 本表的顺序【不能改乱】：提交列表端点按 `ORDER BY s.id DESC` 排序
-//   （src/web/submission_api.cpp:228，不是 created_at DESC），而 WT-HR-01 断言的是
-//   "首行是最新那条"。二者一致的前提是 id 序 == 时间序，因此 ago_minutes 必须
-//   随行号单调递减 —— 曾经把一条 JE（1350 分钟前）排在两条 pending（60/25 分钟前）
-//   之后，结果历史页首行显示的是 22 小时前的那条，而它的 id 却是最大的。
-const SubSeed kSubmissions[] = {
-    {"ZhangLing", "two-sum",                 Kind::kAc,  2, 4320},
-    {"ZhangLing", "array-sum",               Kind::kWa,  1, 4200},
-    {"ZhangLing", "array-max",               Kind::kAc,  3, 4100},
-    {"ZhangLing", "reverse-string",          Kind::kTle, 1, 4000},
-    {"ZhangLing", "is-palindrome",           Kind::kAc,  3, 3900},
-    {"ZhangLing", "count-vowels",            Kind::kAc,  3, 3800},
-    {"ZhangLing", "array-sum",               Kind::kRe,  2, 3700},
-    {"ZhangLing", "array-min",               Kind::kAc,  3, 3600},
-    {"ZhangLing", "second-max",              Kind::kMle, 1, 3500},
-    {"ZhangLing", "binary-search",           Kind::kAc,  3, 3400},
-    {"ZhangLing", "rotate-left",             Kind::kCe,  0, 3300},
-    {"ZhangLing", "count-distinct",          Kind::kAc,  3, 3200},
-    {"ZhangLing", "two-sum",                 Kind::kWa,  1, 3100},
-    {"ZhangLing", "index-of-max",            Kind::kAc,  3, 3000},
-    {"ZhangLing", "max-abs",                 Kind::kJe,  0, 2900},
-    {"ZhangLing", "sum-squares",             Kind::kAc,  3, 2800},
-    {"ZhangLing", "first-negative",          Kind::kWa,  2, 2700},
-    {"ZhangLing", "longest-word-length",     Kind::kAc,  3, 2600},
-    {"ZhangLing", "max-min-diff",            Kind::kCe,  0, 2500},
-    {"ZhangLing", "count-even",              Kind::kAc,  3, 2400},
-    {"ZhangLing", "count-odd",               Kind::kMle, 2, 2300},
-    {"ZhangLing", "array-max",               Kind::kAc,  3, 2200},
-    {"ZhangLing", "count-less",              Kind::kRe,  0, 2100},
-    {"ZhangLing", "count-greater",           Kind::kAc,  3, 2000},
-    {"ZhangLing", "count-even",              Kind::kAc,  3, 1900},
-    {"ZhangLing", "reverse-string",          Kind::kTle, 2, 1800},
-    {"ZhangLing", "count-distinct",          Kind::kAc,  3, 1700},
-    {"ZhangLing", "count-greater",           Kind::kWa,  0, 1600},
-    {"ZhangLing", "two-sum",                 Kind::kAc,  2, 1500},
-    {"ZhangLing", "array-max",               Kind::kAc,  3, 1440},
-    {"ZhangLing", "is-palindrome",           Kind::kAc,  3, 1380},
-    // 第二条 failed/JE：WT-HR-15/16 的「重跑按钮仅对 failed/JE 渲染」需要多于一条才看得出过滤
-    {"ZhangLing", "longest-word-length",     Kind::kJe,  0, 1350},
-    // 两条 pending：管理端「未完成提交」计数（WT-AD-02）与历史页的 pending 徽标
-    //   ⚠️ judge 接线后重启，这两条会被 D-20 重新入队判掉（题面是种子题，判出来是
-    //   什么结论取决于写的解法，回归前记得重跑一次本工具）。
-    {"ZhangLing", "array-sum",               Kind::kPending, 0, 60},
-    {"ZhangLing", "array-sum",               Kind::kPending, 0, 25},
-    // 其他账号：bob02 的三条正好覆盖 WT-SX-02~06「他人提交」所需的非空数据
-    {"bob02", "two-sum",                     Kind::kAc,  2, 3000},
-    {"bob02", "array-sum",                   Kind::kWa,  1, 2900},
-    {"bob02", "reverse-string",              Kind::kCe,  0, 2800},
-    {"carol03", "array-max",                 Kind::kAc,  3, 2400},
-    {"carol03", "is-palindrome",             Kind::kAc,  3, 2300},
-    {"dave04", "count-vowels",               Kind::kTle, 2, 2000},
-};
-
-const char* code_for(Kind kind, const std::string& template_code, int serial) {
-  static std::string buffer;
-  switch (kind) {
-    case Kind::kCe:
-      // 故意写错：vecto<int> —— 对应 WT-RS-09 的 CE 形态
-      buffer = "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n"
-               "    vecto<int> broken(int n) {\n        return n;\n    }\n};\n";
-      break;
-    case Kind::kTle:
-      buffer = "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n"
-               "    int spin(int n) {\n        while (true) {}\n    }\n};\n";
-      break;
-    case Kind::kMle:
-      buffer = "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n"
-               "    int hog(int n) {\n        std::vector<int> a(1 << 28, 7);\n        return a[0];\n    }\n};\n";
-      break;
-    case Kind::kRe:
-      buffer = "#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n"
-               "    int crash(int n) {\n        int* p = nullptr;\n        return *p;\n    }\n};\n";
-      break;
-    default:
-      buffer = template_code + "\n// oj-reset 造数：第 " + std::to_string(serial) + " 次提交\n";
-      break;
-  }
-  return buffer.c_str();
-}
-
-// 逐用例明细：AC 行给输出=期望；失败行给出错输出或错误说明，TLE/MLE/RE 的
-// time_ms 与 mem_kb 留 NULL（§3.2 注释：harness 被 SIGKILL 时没有度量）。
-void insert_case_results(Session& s, long long submission_id, const ProblemRow& problem, Kind kind,
-                         int pass_cases, const char* memory_note) {
-  const int total = static_cast<int>(problem.cases.size());
-  for (int i = 0; i < total; ++i) {
-    const CaseRow& item = problem.cases[static_cast<std::size_t>(i)];
-    const bool passed = i < pass_cases;
-    const char* row_verdict = "AC";
-    std::string output = item.expected_text;
-    std::string error;
-    if (!passed) {
-      switch (kind) {
-        case Kind::kWa:
-          row_verdict = "WA";
-          output = "[]";
-          error = "第 " + std::to_string(i + 1) + " 个用例答案错误";
-          break;
-        case Kind::kTle:
-          row_verdict = "TLE";
-          output.clear();
-          error = "超出时间限制 (" + std::to_string(problem.time_limit_ms) + "ms)";
-          break;
-        case Kind::kMle:
-          row_verdict = "MLE";
-          output.clear();
-          error = memory_note;
-          break;
-        case Kind::kRe:
-          row_verdict = "RE";
-          output.clear();
-          error = "段错误（SIGSEGV）：解法在用例执行中崩溃";
-          break;
-        default:
-          break;
-      }
-    }
-    const bool has_metrics = (std::strcmp(row_verdict, "AC") == 0) ||
-                             (std::strcmp(row_verdict, "WA") == 0);
-    must_run(s,
-             "INSERT INTO submission_case_results "
-             "(submission_id, case_idx, verdict, passed, args_text, output_text, expected_text, "
-             " time_ms, mem_kb, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-             {Value::from_i64(submission_id), Value::from_i64(item.case_idx),
-              Value::from_text(row_verdict), Value::from_bool(passed),
-              Value::from_text(item.args_text), Value::from_text(output),
-              Value::from_text(item.expected_text),
-              has_metrics ? Value::from_i64(2 + (i % 8)) : Value::null(),
-              has_metrics ? Value::from_i64(2048 + (i % 3) * 512) : Value::null(),
-              error.empty() ? Value::null() : Value::from_text(error)},
-             "插入逐用例明细行");
-    ++g_stats.case_rows;
-  }
-}
-
-void insert_submission(Session& s, const SubSeed& seed, long long user_id,
-                       const ProblemRow& problem, int serial) {
-  const bool is_je = seed.kind == Kind::kJe;
-  const bool is_ce = seed.kind == Kind::kCe;
-  const bool is_pending = seed.kind == Kind::kPending;
-  const bool no_details = is_je || is_ce || is_pending;
-
-  // 汇总列口径（§3.2 的注释就是这两条）：
-  //   CE 时 case_total = 题库用例数、case_passed = 0（D-65）
-  //   failed / JE 同样是 0 条明细行（D-67），case_total 也用题库用例数兜底
-  int case_passed = 0;
-  int case_total = problem.case_count;
-  int total_ms = 0;
-  int max_mem_kb = 0;
-  if (!no_details) {
-    case_passed = seed.pass_cases;
-    for (int i = 0; i < seed.pass_cases; ++i) {
-      total_ms += 2 + (i % 8);
-      max_mem_kb = std::max(max_mem_kb, 2048 + (i % 3) * 512);
-    }
-  }
-  if (case_passed > case_total) case_total = case_passed;
-
-  std::string message;
-  switch (seed.kind) {
-    case Kind::kWa:  message = "第 " + std::to_string(seed.pass_cases + 1) + " 个用例答案错误"; break;
-    case Kind::kTle: message = "第 " + std::to_string(seed.pass_cases + 1) + " 个用例超时"; break;
-    case Kind::kMle: message = "第 " + std::to_string(seed.pass_cases + 1) + " 个用例超出地址空间上限"; break;
-    case Kind::kRe:  message = "第 " + std::to_string(seed.pass_cases + 1) + " 个用例运行时错误"; break;
-    case Kind::kCe:  message = "编译错误 · " + std::to_string(case_total) + " 个用例未执行"; break;
-    case Kind::kJe:  message = "平台错误：判题进程未产出 @@OJ@@ 标记，不是你的代码问题"; break;
-    case Kind::kAc:  break;
-    case Kind::kPending: break;
-  }
-
-  const std::string created = utc_stamp(seed.ago_minutes);
-  const std::string finished = utc_stamp(seed.ago_minutes, 3 + (serial % 7));
-  const std::string memory_note =
-      "超出内存限制 (地址空间 " + std::to_string(problem.mem_limit_kb / 1024) + "MB)";
-
-  const char* status = is_pending ? "pending" : (is_je ? "failed" : "done");
-  const char* verdict = verdict_of(seed.kind);
-  must_run(s,
-           "INSERT INTO submissions (user_id, problem_id, language, code, status, verdict, "
-           " message, compiler_output, case_passed, case_total, total_ms, max_mem_kb, "
-           " created_at, finished_at) VALUES (?, ?, 'cpp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-           {Value::from_i64(user_id), Value::from_i64(problem.id),
-            Value::from_text(code_for(seed.kind, problem.code_template, serial)),
-            Value::from_text(status),
-            verdict == nullptr ? Value::null() : Value::from_text(verdict),
-            message.empty() ? Value::null() : Value::from_text(message),
-            Value::null(),
-            is_pending ? Value::null() : Value::from_i64(case_passed),
-            is_pending ? Value::null() : Value::from_i64(case_total),
-            is_pending ? Value::null() : Value::from_i64(total_ms),
-            is_pending ? Value::null() : Value::from_i64(max_mem_kb), Value::from_text(created),
-            is_pending ? Value::null() : Value::from_text(finished)},
-           "插入提交");
-  const long long submission_id = static_cast<long long>(last_insert_id(s, "插入提交"));
-  ++g_stats.submissions;
-
-  if (is_ce) {
-    // CE：补上 compiler_output + 两条诊断行（D-64：只保留 user.cpp，不暴露服务器路径）
-    const std::string raw =
-        "user.cpp: In member function ‘int broken(int)’:\n"
-        "user.cpp:4:9: error: ‘vecto’ was not declared in this scope\n"
-        "user.cpp:4:20: note: suggested alternative: ‘vector’\n"
-        "user.cpp:6:12: error: expected ‘;’ before ‘}’ token\n"
-        "compilation terminated.\n";
-    must_run(s, "UPDATE submissions SET compiler_output = ? WHERE id = ?",
-             {Value::from_text(raw), Value::from_i64(submission_id)}, "回填 CE 的编译器输出");
-    const char* messages[] = {"‘vecto’ was not declared in this scope",
-                              "expected ‘;’ before ‘}’ token"};
-    const int lines[] = {4, 6};
-    const int cols[] = {9, 12};
-    for (int i = 0; i < 2; ++i) {
-      must_run(s,
-               "INSERT INTO submission_compile_errors "
-               "(submission_id, seq, file_name, line, col, severity, message) "
-               "VALUES (?, ?, 'user.cpp', ?, ?, 'error', ?)",
-               {Value::from_i64(submission_id), Value::from_i64(i + 1),
-                Value::from_i64(lines[i]), Value::from_i64(cols[i]), Value::from_text(messages[i])},
-               "插入编译诊断行");
-      ++g_stats.compile_rows;
-    }
-    return;
-  }
-  if (is_je || is_pending) return;  // failed / JE 与 pending：0 条明细行（D-67）
-  insert_case_results(s, submission_id, problem, seed.kind, seed.pass_cases,
-                      memory_note.c_str());
 }
 
 // =============================================================================
@@ -1032,6 +772,17 @@ void report_summary(Session& s) {
   for (int i = 0; i < kTableCount; ++i) {
     std::printf("    %-28s %lld\n", kTables[i], count_rows(s, kTables[i]));
   }
+  // 阶段 0 硬断言（P0-4）：判题结果三表必须为 0 行。谁再往这里加伪造 INSERT，本工具当场失败，
+  // 而不是"造完看着挺像"地把假 verdict 混进历史页 / 掌握分布 / 运维概览。
+  const char* judge_tables[] = {"submissions", "submission_case_results",
+                                "submission_compile_errors"};
+  for (const char* table : judge_tables) {
+    const long long rows = count_rows(s, table);
+    if (rows != 0) {
+      die(std::string("表 ") + table + " 仍有 " + std::to_string(rows) +
+          " 行 —— 阶段 0 要求判题结果只能由 judge 写回（P0-4），请清空后重跑");
+    }
+  }
   const oj::db::ResultSet diff =
       s.run("SELECT difficulty, COUNT(*) AS n FROM problems GROUP BY difficulty ORDER BY difficulty");
   std::printf("    难度分布：");
@@ -1042,7 +793,8 @@ void report_summary(Session& s) {
   const oj::db::ResultSet verdicts =
       s.run("SELECT COALESCE(verdict, 'NULL') AS v, COUNT(*) AS n FROM submissions "
             "GROUP BY v ORDER BY v");
-  std::printf("    verdict 分布：");
+  std::printf("    verdict 分布：%s", verdicts.empty() ? "（空：提交三表为 0 行，符合阶段 0 预期）"
+                                                       : "");
   for (std::size_t i = 0; i < verdicts.size(); ++i) {
     std::printf("%s=%s ", verdicts.at(i).str(0).c_str(), verdicts.at(i).str(1).c_str());
   }
@@ -1053,8 +805,8 @@ void report_summary(Session& s) {
   std::printf("    admin 会话        sid=%s\n", fixed_token("admin-main").c_str());
   std::printf("    alice01 过期会话  sid=%s   （会话过期 WT-ED-14 / WT-MG-11 用）\n\n",
               fixed_token("alice01-expired").c_str());
-  std::printf("[oj-reset] 账号：admin/admin123(D-37 admin)、ZhangLing/666666、"
-              "alice01|erin05(零提交)、bob02|dave04(有提交)\n\n");
+  std::printf("[oj-reset] 账号：admin/admin123(D-37 admin)、ZhangLing/666666、alice01…erin05\n"
+              "[oj-reset] 提交数恒为 0：判题引擎接线前不产出任何 verdict（P0-4）\n\n");
 }
 
 }  // namespace
@@ -1102,8 +854,8 @@ int run(int argc, char** argv) {
   std::printf("[oj-reset] 配置 %s；题库目录 %s\n", env_path.c_str(), problems_dir.c_str());
   if (g_dry_run) {
     std::printf("[oj-reset] --dry-run：不连库、不写任何东西。计划：清 11 张表 → 补 "
-                "%d 个题库文件 → 造 %d 个账号 → 造 %zu 条提交。\n",
-                kSeedCount, kUserCount, sizeof(kSubmissions) / sizeof(kSubmissions[0]));
+                "%d 个题库文件 → 造 %d 个账号 + 4 条会话 + 收藏（提交三表保持 0 行）。\n",
+                kSeedCount, kUserCount);
     return 0;
   }
 
@@ -1156,7 +908,8 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, "[oj-reset] 注意：%zu 道题被跳过（详见 logs/app.log）\n", report.skipped);
   }
 
-  // ---- ③~⑥ 造数：整个阶段共用一条租约 ----
+  // ---- ③~⑤ 造数：整个阶段共用一条租约 ----
+  //   ⚠️ 没有「⑥ 造提交」这一步：判题结果只能由 judge 写回（P0-4）。
   {
     oj::db::Lease lease = oj::db::Pool::instance().acquire();
     if (!lease.valid()) die("取不到数据库连接租约");
@@ -1208,26 +961,6 @@ int run(int argc, char** argv) {
       }
     }
 
-    // ---- 提交 / 明细 / 编译诊断 ----
-    step("⑥ 造 %zu 条提交 + 逐用例明细 + 编译诊断",
-         sizeof(kSubmissions) / sizeof(kSubmissions[0]));
-    {
-      oj::db::Transaction transaction(lease.session());
-      if (!transaction.ok()) die("开启事务失败");
-      int serial = 0;
-      for (const SubSeed& seed : kSubmissions) {
-        const auto user_it = user_ids.find(seed.username);
-        const auto problem_it = by_slug.find(seed.slug);
-        if (user_it == user_ids.end() || problem_it == by_slug.end() ||
-            problem_it->second->cases.empty()) {
-          die(std::string("造数表引用了不存在的题或账号：") + seed.slug);
-        }
-        ++serial;
-        insert_submission(lease.session(), seed, user_it->second, *problem_it->second, serial);
-      }
-      if (!transaction.commit()) die("提交造数事务失败：" + lease.session().error().format());
-    }
-
     report_summary(lease.session());
   }
 
@@ -1235,9 +968,9 @@ int run(int argc, char** argv) {
                        "数据库重置完成：题库文件新增 " +
                            std::to_string(g_stats.problem_files_written) + " 个，账号 " +
                            std::to_string(g_stats.users) + " 个，会话 " +
-                           std::to_string(g_stats.sessions) + " 条，提交 " +
-                           std::to_string(g_stats.submissions) + " 条，逐用例明细 " +
-                           std::to_string(g_stats.case_rows) + " 行（web自动化测试文档 §3 数据底座）");
+                           std::to_string(g_stats.sessions) + " 条，收藏 " +
+                           std::to_string(g_stats.favorites) + " 条；提交三表保持 0 行"
+                           "（判题结果只能由 judge 写回，P0-4）");
 
   std::printf("[oj-reset] 完成。**请重启 ./build/oj** —— 它持有的是进程内题库缓存，"
               "不重启会读到旧题库；重启后列表页/题目页即刻可测。\n");
