@@ -10,9 +10,10 @@
 
 // 必须排在 httplib.h 之前：这是 httplib 默认线程池的【编译期】兜底值。
 // ⚠️ 它不是生效值 —— OJ_HTTP_THREADS 由 listen_and_serve 用运行期 new_task_queue
-// 覆盖（P0-2 的修法）。留着它只是让"忘了覆盖"时的行为仍是确定的 8，而不是
-// httplib 自己那套按 CPU 数推导的动态池（基数 × 4，2 核机上会虚到 32 线程）。
-#define CPPHTTPLIB_THREAD_POOL_COUNT 8
+// 覆盖（P0-2 的修法）。留着它只是让"忘了覆盖"时的行为仍是确定的 4（阶段 3.1 与
+// config 默认值同步下调），而不是 httplib 自己那套按 CPU 数推导的动态池
+// （基数 × 4，2 核机上会虚到 32 线程）。
+#define CPPHTTPLIB_THREAD_POOL_COUNT 4
 
 #include "web/routes.h"
 
@@ -1336,6 +1337,33 @@ void handle_exception(const httplib::Request& req, httplib::Response& res,
   send(common::fail(common::ApiError::kInternalError), res);
 }
 
+// 受保护的 HTML 页面：未登录 302 到登录页 [D-43]，已登录手动读文件下发。
+// P2-11 抽公共实现：原先 history.html / admin.html 各挂一份逐字相同的 lambda；
+// P2-12 顺手补 Cache-Control: no-cache —— 手动 set_content 不经过 set_mount_point，
+// 漏了这个头时浏览器会缓存旧页面，排查成本见下方静态挂载处的长注释。
+void serve_protected_page(const std::string& static_dir, const std::string& page,
+                          const httplib::Request& req, httplib::Response& res) {
+  bool server_error = false;
+  const std::optional<AuthUser> user = viewer_of(req, res, &server_error);
+  if (server_error) return;  // DB 异常，已在 viewer_of 中处理
+  if (!user.has_value()) {
+    // 未登录：重定向到登录页，带上当前路径作为 redirect 参数
+    // req.path 已是 URL 解码后的路径，直接使用（路径中无特殊字符）
+    res.set_header("Location", "/login.html?redirect=" + req.path);
+    res.status = 302;
+    return;
+  }
+  std::ifstream file(static_dir + "/" + page, std::ios::binary);
+  if (!file) {
+    res.status = 404;
+    return;
+  }
+  std::stringstream ss;
+  ss << file.rdbuf();
+  res.set_header("Cache-Control", "no-cache");
+  res.set_content(ss.str(), "text/html; charset=utf-8");
+}
+
 }  // namespace
 
 // 登出的决策（声明与理由见 routes.h 的 LogoutPlan）。
@@ -1440,51 +1468,11 @@ bool register_routes(httplib::Server& server, const ServerOptions& options) {
   // 受保护的 HTML 页面：未登录时重定向到登录页 [D-43]
   // 注意：这些处理器必须在 set_mount_point 之前注册，这样才会优先匹配
   server.Get("/history.html", [&options](const httplib::Request& req, httplib::Response& res) {
-    bool server_error = false;
-    std::optional<AuthUser> user = viewer_of(req, res, &server_error);
-    if (server_error) return;  // DB 异常，已在 viewer_of 中处理
-    if (!user.has_value()) {
-      // 未登录：重定向到登录页，带上当前路径作为 redirect 参数
-      // req.path 已是 URL 解码后的路径，直接使用（路径中无特殊字符）
-      std::string target = "/login.html?redirect=" + req.path;
-      res.set_header("Location", target);
-      res.status = 302;
-      return;
-    }
-    // 已登录：手动读取并服务静态文件
-    std::string file_path = options.static_dir + "/history.html";
-    std::ifstream file(file_path, std::ios::binary);
-    if (!file) {
-      res.status = 404;
-      return;
-    }
-    std::stringstream ss;
-    ss << file.rdbuf();
-    res.set_content(ss.str(), "text/html; charset=utf-8");
+    serve_protected_page(options.static_dir, "history.html", req, res);
   });
 
   server.Get("/admin.html", [&options](const httplib::Request& req, httplib::Response& res) {
-    bool server_error = false;
-    std::optional<AuthUser> user = viewer_of(req, res, &server_error);
-    if (server_error) return;  // DB 异常，已在 viewer_of 中处理
-    if (!user.has_value()) {
-      // 未登录：重定向到登录页，带上当前路径作为 redirect 参数
-      // req.path 已是 URL 解码后的路径，直接使用（路径中无特殊字符）
-      std::string target = "/login.html?redirect=" + req.path;
-      res.set_header("Location", target);
-      res.status = 302;
-      return;
-    }
-    // 已登录：手动读取并服务静态文件
-    std::string file_path = options.static_dir + "/admin.html";
-    std::ifstream file(file_path, std::ios::binary);
-    if (!file) {
-      res.status = 404;
-      return;
-    }
-    std::stringstream ss;
-    ss << file.rdbuf();
-    res.set_content(ss.str(), "text/html; charset=utf-8");
+    serve_protected_page(options.static_dir, "admin.html", req, res);
   });
 
   // 静态挂载放在【最后】：httplib 优先匹配已注册的路由，

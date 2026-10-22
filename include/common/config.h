@@ -75,7 +75,7 @@ struct Config {
   // ---- HTTP（§2.3 / §6.7.3）----
   std::string listen_host = "0.0.0.0";
   int listen_port = 8080;
-  int http_threads = 8;  // cpp-httplib 线程池大小
+  int http_threads = 4;  // cpp-httplib 线程池大小（阶段 3.1：2C2G 默认 4，8 线程×8MB 虚拟栈过量）
 
   // ---- Judge（§2.3 / §5.4.2.1 / §6.7.3）----
   int judge_workers = 2;       // [D-74] 2 核实测机

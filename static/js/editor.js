@@ -8,8 +8,7 @@
 //   额外拼 mode + addon（SPEC §6.2 正是为这件事把 CM 拆成了 5 个文件）；
 //   二是 Ace 的行注释标注（annotations）能**带 message**，鼠标悬停即可看到诊断文本 ——
 //   SPEC §7.3 要求"悬停显示 message"，CodeMirror 的 addLineClass 做不到这一点。
-//   代价：vendored 体积从 ~172KB 涨到 ~550KB，vendor/cm/ 下的 5 个 CM 文件成为死文件
-//   （已在 SPEC §9 T4.5 记录，待 T4.5 收尾时一并清理）。
+//   代价：vendored 体积从 ~172KB 涨到 ~550KB（阶段 3.4 已删掉 vendor/cm/ 死文件）。
 //   **仍走 [D-73] 的 vendored 路线**：ace.js 从不从 CDN 取，运行时零外网依赖。
 //
 // 【草稿：localStorage["draft:"+slug]，change 事件 debounce 800ms】

@@ -28,8 +28,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>运维台 · CppOJ</title>
-  <link rel="stylesheet" href="/css/app.css?v=20261021-1">
-  <link rel="stylesheet" href="/css/admin.css?v=20261021-1">
+  <link rel="stylesheet" href="/css/app.css?v=20261022-1">
+  <link rel="stylesheet" href="/css/admin.css?v=20261022-1">
 </head>
 <body>
   <!-- 顶栏由 common.js 的 renderTopbar() 渲染；「运维」入口按 role 条件渲染 -->
@@ -69,7 +69,7 @@
       <p id="sys-note" class="block__note"></p>
     </section>
 
-    <!-- ---- tab2 题目：清单 + JSON 编辑器 ---------------------------------------- -->
+    <!-- ---- tab2 题目：清单 + 结构化表单编辑器 ------------------------------------- -->
     <section class="card tabs__pane" id="pane-problems" role="tabpanel" hidden>
       <h2 class="block__title">题目 <span id="problem-count" class="muted"></span>
         <span class="tabs__spacer"></span>
@@ -88,14 +88,147 @@
         </table>
       </div>
 
-      <!-- 编辑器：不是模态框而是页内块 —— 手机上模态框里的长 JSON 几乎没法编辑 -->
+      <!-- 编辑器：页内块而不是模态框（窄屏上保存按钮始终在视野内）；
+           字段表单而不是裸 JSON —— 结构化输入 + 就地校验，管理员不必背 §4.1 字段名 -->
       <div id="problem-editor" class="peditor" hidden>
         <div class="peditor__head">
           <b id="peditor-title">新建题目</b>
           <span class="muted mono" id="peditor-slug"></span>
         </div>
-        <textarea id="peditor-json" class="field__input peditor__text" spellcheck="false"
-                  placeholder='{"slug":"two-sum","title":"…"}'></textarea>
+
+        <!-- 基本信息 -->
+        <fieldset class="peditor__section">
+          <legend>基本信息</legend>
+          <div class="peditor__grid peditor__grid--3">
+            <div class="field">
+              <label class="field__label" for="ped-slug">slug *</label>
+              <input class="field__input" id="ped-slug" type="text" spellcheck="false"
+                     placeholder="two-sum" autocomplete="off">
+              <p class="field__hint">小写字母/数字/连字符；决定 URL 与文件名</p>
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-title">标题 *</label>
+              <input class="field__input" id="ped-title" type="text" placeholder="两数之和">
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-difficulty">难度</label>
+              <select class="field__input" id="ped-difficulty">
+                <option value="easy">easy 简单</option>
+                <option value="medium" selected>medium 中等</option>
+                <option value="hard">hard 困难</option>
+              </select>
+            </div>
+          </div>
+          <div class="peditor__grid peditor__grid--4">
+            <div class="field">
+              <label class="field__label" for="ped-tl">时限 (ms)</label>
+              <input class="field__input" id="ped-tl" type="number" min="100" max="600000" value="3000">
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-ml">内存 (KB)</label>
+              <input class="field__input" id="ped-ml" type="number" min="1024" max="4194304" value="131072">
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-sort">排序号</label>
+              <input class="field__input" id="ped-sort" type="number" value="0">
+            </div>
+            <div class="field peditor__check">
+              <label class="field__label" for="ped-featured">精选</label>
+              <input id="ped-featured" type="checkbox">
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- 题面 -->
+        <fieldset class="peditor__section">
+          <legend>题面（Markdown）</legend>
+          <div class="field">
+            <label class="field__label" for="ped-statement">题目描述 *</label>
+            <textarea class="field__input peditor__md" id="ped-statement" rows="10"
+                      placeholder="## 题目描述&#10;&#10;给定 ……"></textarea>
+          </div>
+          <div class="field">
+            <label class="field__label" for="ped-hint">提示（可选）</label>
+            <textarea class="field__input peditor__md" id="ped-hint" rows="3"
+                      placeholder="先想想要不要重复遍历……"></textarea>
+          </div>
+        </fieldset>
+
+        <!-- 函数签名与代码模板 -->
+        <fieldset class="peditor__section">
+          <legend>函数与模板</legend>
+          <div class="peditor__grid peditor__grid--3">
+            <div class="field">
+              <label class="field__label" for="ped-method">方法名 *</label>
+              <input class="field__input" id="ped-method" type="text" spellcheck="false"
+                     placeholder="twoSum" autocomplete="off">
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-return">返回类型 *</label>
+              <select class="field__input" id="ped-return">
+                <option value="int">int</option>
+                <option value="bool">bool</option>
+                <option value="std::string">std::string</option>
+                <option value="std::vector&lt;int&gt;">std::vector&lt;int&gt;</option>
+              </select>
+            </div>
+            <div class="field peditor__check">
+              <label class="field__label" for="ped-adv-toggle">高级选项</label>
+              <input id="ped-adv-toggle" type="checkbox">
+              <p class="field__hint">展开 signature / harness_prelude</p>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="field__label">形参 *（与用例 args 一一对应）</span>
+            <div id="ped-params" class="peditor__params"></div>
+            <button type="button" id="ped-param-add" class="btn btn--ghost btn--sm">+ 添加形参</button>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="ped-template">代码模板 *</label>
+            <textarea class="field__input peditor__code" id="ped-template" rows="10" spellcheck="false"
+                      placeholder="class Solution {&#10;public:&#10;    …&#10;};"></textarea>
+          </div>
+
+          <div id="ped-adv" class="peditor__adv" hidden>
+            <div class="field">
+              <label class="field__label" for="ped-signature">C++ 类声明（自动同步，可手动改）</label>
+              <textarea class="field__input peditor__code" id="ped-signature" rows="5" spellcheck="false"></textarea>
+              <p class="field__hint">改方法名/形参/返回类型时会自动重生成；手动编辑后不再自动覆盖</p>
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-prelude">harness_prelude（可选，仅 __expr 用例需要）</label>
+              <textarea class="field__input peditor__code" id="ped-prelude" rows="3" spellcheck="false"
+                        placeholder="// 编译进判题 harness 的额外代码"></textarea>
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- 测试用例 -->
+        <fieldset class="peditor__section">
+          <legend>测试用例 *</legend>
+          <div id="ped-cases" class="peditor__cases"></div>
+          <button type="button" id="ped-case-add" class="btn btn--ghost btn--sm">+ 添加用例</button>
+        </fieldset>
+
+        <!-- 标签 -->
+        <fieldset class="peditor__section">
+          <legend>标签（可选）</legend>
+          <div class="peditor__grid peditor__grid--2">
+            <div class="field">
+              <label class="field__label" for="ped-tags-algo">算法标签</label>
+              <input class="field__input" id="ped-tags-algo" type="text"
+                     placeholder="数组, 哈希表（逗号分隔）">
+            </div>
+            <div class="field">
+              <label class="field__label" for="ped-tags-source">来源标签</label>
+              <input class="field__input" id="ped-tags-source" type="text"
+                     placeholder="LeetCode 1（逗号分隔）">
+            </div>
+          </div>
+        </fieldset>
+
         <p id="peditor-error" class="field__error"></p>
         <div class="peditor__actions">
           <button type="button" id="peditor-cancel" class="btn btn--ghost">取消</button>
@@ -160,7 +293,7 @@
   </main>
 
   <script type="module">
-    import { initAdminPage } from '/js/admin.js?v=20261021-1';
+    import { initAdminPage } from '/js/admin.js?v=20261022-1';
     initAdminPage(document);
   </script>
 </body>

@@ -283,7 +283,7 @@ MYSQL_DB=oj
 
 # ---- HTTP ----
 OJ_LISTEN=0.0.0.0:8080
-OJ_HTTP_THREADS=8                   # 运行期生效的线程池大小
+OJ_HTTP_THREADS=4                   # 运行期生效的线程池大小（2C2G 默认 4）
 
 # ---- Judge ----
 OJ_JUDGE_WORKERS=2                  # 2 核机：4 worker 会自相争抢
@@ -546,7 +546,7 @@ workers(2)  ←→  gate(4) = 2 × workers  ←→  fence(10)  ←→  性能压
 | `OJ_JUDGE_WORKERS` | 2 | 与 CPU 核数、内存匹配；`gate` 必须同步 = 2×workers |
 | `OJ_JUDGE_GATE` | 4 | 提高后**必须**按 `闸门 × 时限 < 时限 × fence + 5000` 重算 fence，否则合法解法被误判 TLE |
 | `OJ_FENCE_MULTIPLIER` | 10 | 同上；`×10` 的上界由「闸门 < 10」决定 |
-| `OJ_HTTP_THREADS` | 8 | 2G 机器可降到 4；运行期生效 |
+| `OJ_HTTP_THREADS` | 4 | 2C2G 默认 4；运行期生效 |
 | MySQL `innodb_buffer_pool_size` | 64MB | 2GB 机器不要调回默认 128MB |
 | 每题 `mem_limit_kb` | 131072 | **AS 口径**；树/图/大矩阵题逐题调大（如 262144），别套默认值 |
 

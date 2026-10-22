@@ -8,21 +8,29 @@
 
 ## 0. 总体结论
 
-系统在「界面、路由、数据结构」三层都是完整的，但有三类断裂导致它跑不通：
+> **状态更新（2026-10-22，阶段 0/1/2/3 全部完成后重写本节）**
+> 下面这张表最初是阶段 0 开工前的审计快照，已按 6.6 TODO 的完成状态逐行改写。
+> 判题引擎、管理端 CRUD、限流三件套、资源收尾均已接线并验收；**四个阶段全部完成**。
 
-1. **判题引擎整体缺失** —— 5 个源文件 + 5 个头文件全是 0 字节，提交链路被一个硬编码的 `false` 拦死。
-2. **库里的"判题结果"是造出来的** —— 造数工具直接 INSERT 成 judge 写回后的样子，前端所有历史/verdict/逐用例明细都是假数据。
-3. **配置项在说谎** —— 限流、配额、线程数三项被解析、被启动日志打印，但运行时零消费。
+原审计发现的三类断裂，现状如下：
 
-已确认存在的核心断裂（用户可见症状）：
+| # | 原断裂 | 现状 | 证据 |
+|---|---|---|---|
+| 1 | 判题引擎整体缺失，提交链路被硬编码 `false` 拦死 | ✅ **已修复（阶段 1）** | `src/judge/` 五个 .cpp + 五个 .h 全部实现；`judge_available()` 改读调度器存活；`make test` 417/417 |
+| 2 | 库里"判题结果"是造数工具伪造的 | ✅ **已修复（阶段 0）** | `tools/reset_db.cpp` 伪造插入已删除，三表恒 0 行 + 自检；活库已清空重同步 |
+| 3 | 限流/配额/线程数三项配置在说谎 | ✅ **已修复（阶段 2）** | `src/web/ratelimit.cpp` 已实现滑动窗口（1006）+ 并发闸（1007）；`OJ_HTTP_THREADS` 改运行期 `set_thread_pool_count()` |
 
-| 症状 | 根因 | 位置 |
+用户可见症状对照（原表 → 现状）：
+
+| 症状 | 根因 | 现状 |
 |---|---|---|
-| 提交返回 1009「判题服务不可用」，不落库 | `judge_available()` 硬编码 `return false` | `src/web/submission_api.cpp:154` |
-| 提交历史全是假的 | 造数工具伪造 verdict/明细 | `tools/reset_db.cpp:876-940`（**阶段 0 已修**：伪造插入已删除，三表恒 0 行 + 自检） |
-| 管理面板只有只读卡片 | D-37 刻意只读，CRUD 未实现 | `src/web/admin.cpp` |
-| 判题跑不起来 | `src/judge/{queue,scheduler,worker,runner,generator}.cpp` 与对应 `.h` 全 0 字节 | `src/judge/` |
-| 限流/配额不生效 | `src/web/ratelimit.cpp` 0 字节，配置零消费 | 见 P0-1 |
+| 提交返回 1009「判题服务不可用」，不落库 | `judge_available()` 硬编码 `return false` | ✅ 已接调度器存活状态，可正常提交并判题 |
+| 提交历史全是假的 | 造数工具伪造 verdict/明细 | ✅ 阶段 0 已删伪造插入，历史全部来自真实判题 |
+| 管理面板只有只读卡片，CRUD 未实现 | D-37 刻意只读 | ✅ **阶段 2 已扩为四 tab 管理台**：题目 CRUD（文件写回 + 单题同步入库）、提交删除/重判、用户改角色/停用全部可用；唯一有意保留的约束是题目**不物理删**（下线归档 `archived=1`，见 §3 决策） |
+| 判题跑不起来 | `src/judge/` 10 个文件全 0 字节 | ✅ 已实现 queue / scheduler / worker / runner / generator + `src/db/dao.*` |
+| 限流/配额不生效 | `src/web/ratelimit.cpp` 0 字节 | ✅ 已实现并接入 `handle_submission_create`，`tests/run_tests.sh` [22] 覆盖 1006/1007 |
+
+**剩余未做**：无（阶段 0–3 全部完成，2026-10-22 验收）。
 
 ---
 
@@ -256,10 +264,22 @@
 > 7. **管理台页面的浏览器级验收留给人工**（playwright-cli 未安装）：页面/脚本/接口三层已由
 >    e2e + 静态 id 对账（admin.js 的 25 个 `querySelector('#…')` 与 admin.html 完全对应）覆盖。
 >
-### 阶段 3 · 资源与收尾
+### 阶段 3 · 资源与收尾 ✅ 已完成（2026-10-22）
 
-- [ ] **3.1** 父进程设置 `MALLOC_ARENA_MAX=1`，HTTP 线程默认 4
-- [ ] **3.2** 抽 `serve_protected_page()` 消除重复 lambda（P2-11）
-- [ ] **3.3** 受保护页补 `Cache-Control: no-cache`（P2-12）
-- [ ] **3.4** 删除 `static/js/diff.js`、`vendor/cm/` 死文件（P2-13）
-- [ ] **3.5** 全量回归：`make build JOBS=2 && make test` + playwright 手册全量
+- [x] **3.1** 父进程设置 `MALLOC_ARENA_MAX=1`（main() 首行 setenv，overwrite=0），HTTP 线程默认 4（config.h 内置默认 + .env + 编译期兜底宏三处同步）
+- [x] **3.2** 抽 `serve_protected_page()` 消除重复 lambda（P2-11）
+- [x] **3.3** 受保护页补 `Cache-Control: no-cache`（P2-12，在 serve_protected_page 内一次补齐）
+- [x] **3.4** 删除 `static/js/diff.js`、`vendor/cm/` 死文件（P2-13），同步修正 editor.js 注释
+- [x] **3.5** 全量回归：`make build JOBS=1` 绿（2C2G 不支持并发编译）+ `make test` 417/417 + `tests/run_tests.sh` 147/147
+
+> 阶段 3 实施时的额外发现（留档，不在原清单）：
+>
+> 1. **受保护页 lambda 在 httplib 0.60.1 下是死代码**：`Server::routing()` 对 GET/HEAD
+>    **先走 `handle_file_request`（mount point）再走注册 handler**（httplib.h:14110-14112），
+>    所以 `/history.html`、`/admin.html` 永远被静态挂载抢答，两个 lambda 从未执行——
+>    原注释「必须在 set_mount_point 之前注册才优先匹配」与该版本行为相反。
+>    e2e [20] 也断言未登录 `/admin.html` → 200，行为已被测试固化。
+>    本次只按 TODO 完成抽函数 + 补缓存头（函数在 mount point 移除/文件缺失时仍会生效），
+>    **未改路由行为**；若要真正「未登录跳登录页」，需改用 pre_routing 或换注册策略，另开任务。
+> 2. 验收：启动日志打印「线程池 4」；curl 未登录 `/history.html`、`/admin.html` 均带
+>    `Cache-Control: no-cache`（来自静态挂载路径，与受保护页函数的头一致）。

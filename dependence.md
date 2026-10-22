@@ -199,7 +199,7 @@ OJ_FENCE_MULTIPLIER=10
 | 变量 | 默认 | 来源 |
 |---|---|---|
 | `OJ_JUDGE_USER_GATE` | 2 | §1.4 单用户同时评测数上限 |
-| `OJ_HTTP_THREADS` | 8 | §2.3 httplib 线程池 |
+| `OJ_HTTP_THREADS` | 4 | §2.3 httplib 线程池（阶段 3 起默认 4） |
 | `OJ_JUDGE_WORKDIR` | `/tmp/oj-judge` | §5.1 工作区 |
 | `OJ_PROBLEMS_DIR` / `OJ_STATIC_DIR` | `./problems` / `./static` | §2.1-A |
 | `OJ_LOG_DIR` / `OJ_LOG_RETENTION_DAYS` | `./logs` / 7 | §1.4 可观测 |

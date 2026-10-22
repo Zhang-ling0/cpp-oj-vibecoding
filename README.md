@@ -119,7 +119,7 @@ make run          # 未起 mysqld 则先拉起，再从仓库根启动服务
 | 层 | 选型 | 备注 |
 |---|---|---|
 | 语言 / 工具链 | C++17 · g++-12（锁定） | 判题编译命令 `-std=c++17 -O2 -Wall` |
-| HTTP | cpp-httplib **0.60.1**（header-only，`/usr/local/include/httplib.h`） | 明文 HTTP；线程池由 `OJ_HTTP_THREADS` 决定（默认 8） |
+| HTTP | cpp-httplib **0.60.1**（header-only，`/usr/local/include/httplib.h`） | 明文 HTTP；线程池由 `OJ_HTTP_THREADS` 决定（默认 4） |
 | JSON | nlohmann-json 3.11.3 | 题库解析 + 响应包络 |
 | 存储 | MySQL 8 / libmysqlclient | 11 张表；应用启动时幂等 `CREATE TABLE IF NOT EXISTS` |
 | 密码哈希 | OpenSSL Blowfish（自实现） `[D-75]` | 24.04 官方源无 `libbcrypt-dev` |
@@ -197,7 +197,7 @@ Judge Worker × 2: 取题（进程内缓存）→ 生成 3 个 harness 文件 �
 | `OJ_FENCE_MULTIPLIER` | `10` | 兜底墙钟系数；**改闸门前必须重算**（§5.4.2.1） |
 | `OJ_ALLOW_REGISTER` | `1` | `0` = 关闭注册（1010） |
 | `OJ_ADMIN_USERNAMES` | 未设置 | 管理员名单，**角色唯一真源**；未设置 = 不动 role，显式留空 = 全员降权 |
-| `OJ_HTTP_THREADS` | `8` | HTTP 线程池（运行期生效） |
+| `OJ_HTTP_THREADS` | `4` | HTTP 线程池（运行期生效，阶段 3 起 2C2G 默认 4） |
 | `OJ_MAX_CODE_BYTES` / `OJ_RATE_*` | `65536` / `60s·10次` | 代码长度与提交频率配额 |
 
 **启用管理员的固定顺序**：先注册账号 → 把用户名写进 `OJ_ADMIN_USERNAMES` → 重启服务
@@ -238,10 +238,9 @@ sanitizer 构建 `-j1` + `ASAN_OPTIONS=detect_leaks=0`、**ctest 不加 `-j`**�
 
 **当前未完成**（详见 [question.md](question.md) §6）
 
-- **阶段 3 收尾**：`MALLOC_ARENA_MAX` 与 HTTP 线程默认值下调、受保护页缓存头、
-  死文件清理（`static/js/diff.js` 0 字节、`static/vendor/cm/` 已被 Ace 取代）、全量浏览器回归
-- **前端并排 diff 未实现**：后端 `GET /api/submissions/diff` 已就绪，`diff.js` 仍为空文件
-  （`[D-42][D-50]` 的 UI 欠账，落地页文案目前超前于实现）
+- ~~阶段 3 收尾~~：✅ 已完成（2026-10-22，见 question.md §6 阶段 3）
+- **前端并排 diff 未实现**：后端 `GET /api/submissions/diff` 已就绪，前端 UI 仍缺
+  （`[D-42][D-50]` 的欠账；原空文件 `diff.js` 已在阶段 3.4 清理，落地需重新实现）
 - **路线 B（Docker）**：`Dockerfile` / `docker-compose.yml` 为空占位，T0.2 未开工
 - **`static/vendor/LICENSES/`** 未落盘（三份 MIT LICENSE）
 

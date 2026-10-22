@@ -43,6 +43,7 @@
 // =============================================================================
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -247,6 +248,13 @@ bool ensure_columns(std::string* error) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 阶段 3.1：父进程压 glibc arena 数。glibc 每个 malloc arena 在 64 位上预留
+  // 64MB 虚拟地址空间，多线程进程默认 8×核数 个 arena —— 1967MB + swap 已用 1GB
+  // 的机器上正是 SPEC §0.0 禁止的过量虚拟内存申请（判题子进程侧 runner/compiler
+  // 已各自设过，这里补 HTTP 主进程）。overwrite=0：运维显式 export 的值优先。
+  // 必须在 setvbuf / 任何首次 malloc 之前 —— glibc 在第一次 malloc 时读该变量。
+  ::setenv("MALLOC_ARENA_MAX", "1", 0);
+
   // 本进程自 T0.5 起转为常驻（listen 阻塞），而启动回显是【启动期诊断的唯一出口】
   // —— 配置错误、端口被占、题库同步失败都在退出前打到 stdout。
   // stdout 默认在【非 TTY】（重定向到文件、nohup、systemd）时是全缓冲：
